@@ -8,7 +8,8 @@ interface ProcRow {
 /** Runs a command and returns its stdout and its own PID (so it can be left out of the table). */
 function run(file: string, args: string[]): Promise<{ stdout: string; pid: number | undefined }> {
   return new Promise((resolve, reject) => {
-    const child = execFile(file, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) =>
+    // Capped: this runs inside the kill path, and a slow machine must not delay a "stop".
+    const child = execFile(file, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024, timeout: 5_000 }, (err, stdout) =>
       err ? reject(err) : resolve({ stdout, pid: child.pid }),
     );
   });

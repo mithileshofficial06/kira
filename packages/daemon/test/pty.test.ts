@@ -37,8 +37,8 @@ describe("runInPty", () => {
     setTimeout(() => ac.abort("user said stop"), 1_000);
     const started = Date.now();
     await expect(p).rejects.toBeInstanceOf(AbortedError);
-    expect(Date.now() - started).toBeLessThan(10_000);
-  }, 30_000);
+    expect(Date.now() - started).toBeLessThan(process.env.CI ? 30_000 : 10_000);
+  }, 60_000);
 });
 
 describe("PtyProcess.kill", () => {

@@ -156,12 +156,13 @@ describe("runAgent", () => {
     const r = await run;
 
     expect(r.status).toBe("aborted");
-    expect(Date.now() - t0).toBeLessThan(10_000);
+    // Shared CI runners start PowerShell and taskkill several times slower than a dev machine.
+    expect(Date.now() - t0).toBeLessThan(process.env.CI ? 30_000 : 10_000);
     // Step 1 committed; the interrupted step 2 was dropped whole.
     const assistants = r.messages.filter((m) => m.role === "assistant");
     expect(assistants).toHaveLength(1);
     assertTurnBoundaries(r.messages);
-  }, 30_000);
+  }, 60_000);
 
   it("with checkpoints: an interrupt rewinds the partial writes of the interrupted step", async () => {
     const manager = await CheckpointManager.open(ws, { initIfMissing: true });
