@@ -269,6 +269,25 @@ describe("runSession", () => {
     expect(session.transitions.map((t) => t.to)).toEqual(["EXECUTING", "INTERRUPTED", "REPORTING", "IDLE"]);
   }, 30_000);
 
+  it("an unexpected error still ends in a FAILED report and an IDLE session", async () => {
+    const broken: ChatFn = async function* () {
+      yield* [];
+      throw new Error('No usable model for role "executor". Set an API key for one of its providers.');
+    };
+    const report = await runSession({
+      goal: "anything",
+      workspace: ws,
+      chatFor: () => broken,
+      approver: async () => true,
+      signal: new AbortController().signal,
+      plan: false,
+    });
+    expect(report.status).toBe("failed");
+    expect(report.summary).toMatch(/Run failed: No usable model/);
+    const session = JSON.parse(readFileSync(join(runDirFor(ws, report.runId), "session.json"), "utf8")) as SessionRecord;
+    expect(session.state).toBe("IDLE");
+  });
+
   it("resumes a crashed run from its persisted history", async () => {
     const first = scripted([{ calls: [write("a.txt", "1")] }, { calls: [write("b.txt", "2")] }]);
     // Simulate a crash: the run is cut off by the step budget while EXECUTING, then its session is rewritten to look mid-run.

@@ -110,6 +110,11 @@
       }
     }
   },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "test": "vitest run"
+  },
   "dependencies": {
     "vscode-jsonrpc": "^9.0.2"
   },

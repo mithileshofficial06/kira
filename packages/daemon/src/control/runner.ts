@@ -159,6 +159,7 @@ export async function runSession(opts: SessionOptions): Promise<RunReport> {
 
   let result: RunResult | undefined;
   let blockedBeforeRun: string | undefined;
+  let crashed: string | undefined;
   try {
     // ---- plan --------------------------------------------------------
     let goalText = opts.goal;
@@ -283,13 +284,17 @@ export async function runSession(opts: SessionOptions): Promise<RunReport> {
       });
     }
   } catch (err) {
-    if (!(isAbortError(err) || opts.signal.aborted)) throw err;
-    blockedBeforeRun = "Interrupted before execution started.";
+    if (isAbortError(err) || opts.signal.aborted) blockedBeforeRun = "Interrupted before execution started.";
+    else {
+      // An unexpected error still ends in a report: the panel must never be left mid-run.
+      crashed = `Run failed: ${(err as Error).message}`;
+      audit.append({ type: "run_end", status: "failed", summary: (err as Error).stack?.slice(0, 2000) ?? crashed, costUsd: 0, tokens: 0 });
+    }
   }
 
   // ---- report ----------------------------------------------------------
   await pendingDiff;
-  const status =result?.status ?? (opts.signal.aborted ? "aborted" : "blocked");
+  const status = result?.status ?? (opts.signal.aborted ? "aborted" : crashed ? "failed" : "blocked");
   if (status === "aborted") session.to("INTERRUPTED", result?.summary ?? blockedBeforeRun);
   else if (session.state === "RATE_LIMITED") session.resume("gave up waiting");
   if (session.state === "IDLE") session.to("EXECUTING", "nothing to execute");
@@ -300,7 +305,7 @@ export async function runSession(opts: SessionOptions): Promise<RunReport> {
     runId,
     goal: opts.goal,
     status,
-    summary: result?.summary ?? blockedBeforeRun ?? "",
+    summary: result?.summary ?? crashed ?? blockedBeforeRun ?? "",
     steps: result?.steps ?? 0,
     durationMs: Date.now() - started,
     models: [...new Set((result?.models ?? []).map((m) => `${m.provider}/${m.model}`))],

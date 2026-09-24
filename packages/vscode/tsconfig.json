@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node", "vscode"],
+    "noEmit": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/webview/**"]
+}
