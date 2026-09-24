@@ -9,7 +9,8 @@ Models: **Mistral** (primary) and **NVIDIA NIM** (specialist roles and cross-fam
 
 ## Status
 
-**Phase 0: loop spike.** Built and unit-tested; waiting on a live run against real models.
+**Phase 0 (loop spike):** built and tested offline; the live exit test needs API keys.
+**Phase 1 (control plane):** checkpoints, rewind and the chaos exit test are done; the state machine and cost budget are next.
 
 | Piece | State |
 |---|---|
@@ -20,7 +21,10 @@ Models: **Mistral** (primary) and **NVIDIA NIM** (specialist roles and cross-fam
 | Autonomy gate (hard gates, credential deny rules) | done |
 | Agent loop: validation, JSON repair, loop detection, budgets, clean abort | done |
 | Spike CLI with injected-failure preset | done |
+| Git shadow-ref checkpoints; rewind of the interrupted step | done |
+| **Phase 1 exit test:** 10 random interrupts → 0 orphans, clean tree | **passing** |
 | Phase 0 exit test on both providers | **needs API keys** |
+| Session state machine, cost budget, audit log | next |
 
 ## Setup
 
@@ -56,6 +60,7 @@ npm test
 ```
 packages/daemon/src/
   agent/       loop, system prompt, JSON repair, error-hash loop detection
+  checkpoint/  git shadow-ref checkpoints and rewind
   config/      kira.models.json schema and loader
   providers/   Mistral/NIM adapter, rate limiter, fallback registry
   process/     PTY processes, descendant snapshot, tree kill
