@@ -3,7 +3,7 @@ import type { ModelRef } from "../config/models.js";
 import type { FallbackEvent, RoleChatEvent } from "../providers/registry.js";
 import type { ChatMessage, ChatRequest, ToolCall, Usage } from "../providers/types.js";
 import { toToolSpec, type Tool, type ToolContext, type ToolResult } from "../tools/index.js";
-import { AbortedError, isAbortError } from "../util/abort.js";
+import { AbortedError, isAbortError, throwIfAborted } from "../util/abort.js";
 import { ErrorRepeatTracker } from "./error-hash.js";
 import { parseToolArgs } from "./json-repair.js";
 
@@ -91,6 +91,7 @@ export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResul
   let checkpointedStep = 0;
   try {
     while (step < maxSteps) {
+      throwIfAborted(opts.signal);
       step++;
       emit("step", step, `step ${step}/${maxSteps}`);
       if (opts.checkpoints) {
@@ -115,6 +116,7 @@ export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResul
           usage.completionTokens += ev.usage.completionTokens;
         }
       }
+      throwIfAborted(opts.signal);
       if (text.trim()) emit("narration", step, text.trim());
 
       // The turn is staged and only committed once every call has its result.
