@@ -191,7 +191,7 @@ export function learnLessons(transcript: readonly ChatMessage[]): Lesson[] {
           out.push({ signature: sig, failed: f.command, ok: a.command, error: f.error });
         }
         lastFailure.delete(sig);
-      } else if (/^(exit code [1-9-]|TIMED OUT)/.test(result)) {
+      } else if (/^(exit code [1-9-]|TIMED OUT|WAITING FOR INPUT)/.test(result)) {
         const error = result.split("\n").slice(1).map((l) => l.trim()).filter(Boolean).find((l) => /err|fail|not found|denied|cannot|unable/i.test(l)) ??
           result.split("\n")[0]!;
         lastFailure.set(sig, { command: a.command, error: error.slice(0, 200) });

@@ -155,6 +155,8 @@ export interface RunResult {
   exitCode: number | null;
   output: string;
   timedOut: boolean;
+  /** Killed because it sat on an interactive question nobody can answer. */
+  waitingForInput?: boolean;
   durationMs: number;
   kill?: KillReport;
 }
@@ -164,6 +166,22 @@ export interface RunOptions extends PtySpawnOptions {
   signal: AbortSignal;
   /** Raw output as it arrives (for a live terminal mirror). */
   onData?: (data: string) => void;
+  /** Kill the command if its output has been quiet this long and ends in an interactive prompt. */
+  promptIdleMs?: number;
+}
+
+/**
+ * The tail of a terminal that is waiting for a keypress: select menus
+ * (create-vite, clack, inquirer), y/n questions, "press enter", "Ok to proceed?".
+ */
+const INTERACTIVE_PROMPT = /(\(y\/n\)|\[y\/n\]|\(yes\/no\)|press (any key|enter)|ok to proceed\??|need to install the following packages|[◆◇❯›●○]\s|\?\s*$|:\s*$|select|choose|which .{1,60}\?)/i;
+
+export function looksLikePrompt(output: string): boolean {
+  const tail = output
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .trimEnd()
+    .slice(-400);
+  return tail.length > 0 && INTERACTIVE_PROMPT.test(tail.split("\n").slice(-6).join("\n"));
 }
 
 /**
@@ -176,14 +194,23 @@ export async function runInPty(command: string, opts: RunOptions): Promise<RunRe
   const started = Date.now();
   const proc = PtyProcess.spawn(command, opts);
   let output = "";
+  let lastOutputAt = Date.now();
   proc.onData((d) => {
     output += d;
+    lastOutputAt = Date.now();
     opts.onData?.(d);
   });
 
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<"timeout">((resolve) => {
     if (opts.timeoutMs) timer = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+  });
+  let watchdog: NodeJS.Timeout | undefined;
+  const prompted = new Promise<"prompt">((resolve) => {
+    if (!opts.promptIdleMs) return;
+    watchdog = setInterval(() => {
+      if (Date.now() - lastOutputAt >= opts.promptIdleMs! && looksLikePrompt(output)) resolve("prompt");
+    }, 500);
   });
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<"abort">((resolve) => {
@@ -192,10 +219,14 @@ export async function runInPty(command: string, opts: RunOptions): Promise<RunRe
   });
 
   try {
-    const outcome = await Promise.race([proc.exited, timedOut, aborted]);
+    const outcome = await Promise.race([proc.exited, timedOut, aborted, prompted]);
     if (outcome === "abort") {
       await proc.kill();
       throw new AbortedError(opts.signal.reason);
+    }
+    if (outcome === "prompt") {
+      const kill = await proc.kill();
+      return { exitCode: null, output, timedOut: false, waitingForInput: true, durationMs: Date.now() - started, kill };
     }
     if (outcome === "timeout") {
       const kill = await proc.kill();
@@ -204,6 +235,7 @@ export async function runInPty(command: string, opts: RunOptions): Promise<RunRe
     return { exitCode: outcome, output, timedOut: false, durationMs: Date.now() - started };
   } finally {
     clearTimeout(timer);
+    clearInterval(watchdog);
     if (onAbort) opts.signal.removeEventListener("abort", onAbort);
   }
 }

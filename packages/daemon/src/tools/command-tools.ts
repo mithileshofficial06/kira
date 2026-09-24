@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { z } from "zod";
 import { runInPty } from "../process/pty-process.js";
 import { sleep } from "../util/abort.js";
@@ -6,6 +7,21 @@ import { defineTool, type ToolContext, type ToolResult } from "./types.js";
 import { resolveInWorkspace } from "./workspace.js";
 
 const MAX_OUTPUT_CHARS = 6_000;
+/** Quiet this long on what looks like a question: nobody is going to answer it. */
+const PROMPT_IDLE_MS = 8_000;
+
+/** A clear message instead of node-pty's "Cannot create process, error code: 267". */
+function missingDir(dir: string, cwd: string | undefined): ToolResult | undefined {
+  try {
+    if (statSync(dir).isDirectory()) return undefined;
+    return { content: `Working directory "${cwd}" is a file, not a folder.`, isError: true };
+  } catch {
+    return {
+      content: `Working directory "${cwd}" does not exist. An earlier step may have failed: check that it created the folder before running commands in it.`,
+      isError: true,
+    };
+  }
+}
 
 async function gated(tool: string, command: string, ctx: ToolContext): Promise<ToolResult | undefined> {
   const d = await ctx.gate.checkCommand(tool, command, ctx.signal);
@@ -27,19 +43,28 @@ export const runCommandTool = defineTool({
     const denied = await gated("run_command", command, ctx);
     if (denied) return denied;
     const dir = resolveInWorkspace(ctx.workspace, cwd ?? ".", "read");
+    const missing = missingDir(dir, cwd);
+    if (missing) return missing;
     ctx.log(`$ ${command}`);
     const termId = `cmd-${Date.now().toString(36)}`;
     ctx.onTerminal?.(termId, `\r\n\x1b[36m$ ${command}\x1b[0m\r\n`);
     const r = await runInPty(command, {
       cwd: dir,
       timeoutMs: timeoutSeconds * 1000,
+      promptIdleMs: PROMPT_IDLE_MS,
       signal: ctx.signal,
       onData: ctx.onTerminal ? (d) => ctx.onTerminal!(termId, d) : undefined,
     });
     const output = truncateMiddle(stripAnsi(r.output).trim(), MAX_OUTPUT_CHARS);
-    const status = r.timedOut ? `TIMED OUT after ${timeoutSeconds}s (process tree killed)` : `exit code ${r.exitCode}`;
-    ctx.log(`  -> ${status} in ${(r.durationMs / 1000).toFixed(1)}s`);
-    return { content: `${status}\n${output || "(no output)"}`, isError: r.timedOut || r.exitCode !== 0 };
+    const secs = (r.durationMs / 1000).toFixed(0);
+    const status = r.waitingForInput
+      ? `WAITING FOR INPUT after ${secs}s (process tree killed): the command asked an interactive question and nobody can answer it. ` +
+        `Re-run it non-interactively (flags such as --yes, --no-interactive, --template <name>, or piping "echo y |").`
+      : r.timedOut
+        ? `TIMED OUT after ${timeoutSeconds}s (process tree killed)`
+        : `exit code ${r.exitCode}`;
+    ctx.log(`  -> ${r.waitingForInput ? "waiting for input (killed)" : status} in ${(r.durationMs / 1000).toFixed(1)}s`);
+    return { content: `${status}\n${output || "(no output)"}`, isError: r.timedOut || !!r.waitingForInput || r.exitCode !== 0 };
   },
 });
 
@@ -61,6 +86,8 @@ export const startBackgroundTool = defineTool({
     const denied = await gated("start_background", command, ctx);
     if (denied) return denied;
     const dir = resolveInWorkspace(ctx.workspace, cwd ?? ".", "read");
+    const missing = missingDir(dir, cwd);
+    if (missing) return missing;
     let ready: RegExp;
     try {
       ready = readyPattern ? new RegExp(readyPattern, "i") : URL_PATTERN;

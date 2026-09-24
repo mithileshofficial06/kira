@@ -59,6 +59,28 @@ describe("run_command", () => {
     expect(r.isError).toBe(false);
   }, 20_000);
 
+  it("kills a command stuck on an interactive question and says how to fix it", async () => {
+    // Like create-vite asking "Which linter to use?" with nobody to answer.
+    const ask = `"${process.execPath}" -e "process.stdout.write('\\u25c6  Which linter to use?\\n\\u25cf Oxlint\\n\\u25cb ESLint\\n'); process.stdin.resume()"`;
+    const t0 = Date.now();
+    const r = await runCommandTool.run({ command: ask }, ctx);
+    expect(Date.now() - t0).toBeLessThan(20_000);
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/^WAITING FOR INPUT after \d+s .*non-interactively/);
+    expect(r.content).toContain("Which linter to use?");
+  }, 40_000);
+
+  it("does not mistake a quiet command for a prompt", async () => {
+    const quiet = `"${process.execPath}" -e "console.log('compiling 3 files'); setTimeout(() => console.log('done'), 9500)"`;
+    const r = await runCommandTool.run({ command: quiet }, ctx);
+    expect(r.content).toMatch(/^exit code 0[\s\S]*done/);
+  }, 40_000);
+
+  it("explains a missing working directory instead of a Windows error code", async () => {
+    const r = await runCommandTool.run({ command: "npm install", cwd: "./app" }, ctx);
+    expect(r).toMatchObject({ isError: true, content: expect.stringMatching(/Working directory "\.\/app" does not exist/) });
+  });
+
   it("sends gated commands to the approver and reports a refusal", async () => {
     const r = await runCommandTool.run({ command: "git push origin main" }, ctx);
     expect(r.isError).toBe(true);

@@ -65,7 +65,7 @@ export class KiraMemory implements RunMemory {
   async recordRun(report: RunReport, transcript: readonly ChatMessage[], signal: AbortSignal): Promise<void> {
     const files = filesWritten(transcript);
     const errors = transcript
-      .filter((m): m is Extract<ChatMessage, { role: "tool" }> => m.role === "tool" && /^(exit code [1-9-]|TIMED OUT|Error|Invalid)/.test(m.content))
+      .filter((m): m is Extract<ChatMessage, { role: "tool" }> => m.role === "tool" && /^(exit code [1-9-]|TIMED OUT|WAITING FOR INPUT|Error|Invalid)/.test(m.content))
       .map((m) => m.content.split("\n")[0]!.slice(0, 120))
       .slice(0, 5);
     await this.store.add(
