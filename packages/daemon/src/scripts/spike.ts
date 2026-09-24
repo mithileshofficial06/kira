@@ -1,19 +1,23 @@
 /**
- * Phase 0 spike: run the agent loop headless against real models.
+ * Headless Kira run against real models.
  *
  *   npm run spike -- --preset vite
  *   npm run spike -- --preset vite-typo --yes        (Phase 0 exit test: injected failure)
  *   npm run spike -- "your goal" --workspace C:\path\to\dir
  *
  * Flags:
- *   --preset <name>     vite | vite-typo
- *   --workspace <dir>   working directory (default: a fresh temp folder)
- *   --yes               approve every gated action without asking
- *   --role <role>       model role to drive the loop (default: executor)
- *   --max-steps <n>     step budget (default 30)
+ *   --preset <name>      vite | vite-typo
+ *   --workspace <dir>    working directory (default: a fresh temp folder)
+ *   --yes                approve every gated action without asking
+ *   --autonomy <0-4>     observe | propose | step | run | trust (default 3)
+ *   --no-plan            skip the planner
+ *   --no-verify          skip the verification ladder
+ *   --max-steps <n>      step budget (default 30)
+ *   --max-cost <usd>     cost ceiling (default 2)
+ *   --resume <runId>     continue a run whose process died
  *
- * Ctrl+C once interrupts cleanly (process trees killed, history kept to the
- * last complete turn). Ctrl+C twice exits immediately.
+ * Ctrl+C once interrupts cleanly (process trees killed, the interrupted step
+ * rewound, history kept to the last complete turn). Ctrl+C twice exits.
  */
 import { config as loadEnv } from "dotenv";
 import { mkdir } from "node:fs/promises";
@@ -21,12 +25,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { runAgent, type AgentEvent } from "../agent/loop.js";
-import { CheckpointManager } from "../checkpoint/manager.js";
-import { systemPrompt } from "../agent/prompt.js";
-import { findConfig, loadModelsConfig, Role } from "../config/models.js";
+import type { AutonomyLevel } from "../control/autonomy.js";
+import type { KiraEvent } from "../control/events.js";
+import { runSession } from "../control/runner.js";
+import { findConfig, loadModelsConfig } from "../config/models.js";
 import { ProviderRegistry } from "../providers/registry.js";
-import { BackgroundManager, Gate, PHASE0_TOOLS, type Approver } from "../tools/index.js";
+import type { Approver } from "../tools/index.js";
+import { createVerifier } from "../verify/ladder.js";
+import { openMemory } from "../memory/run-memory.js";
 
 const PRESETS: Record<string, string> = {
   vite:
@@ -44,37 +50,37 @@ const { values, positionals } = parseArgs({
     preset: { type: "string" },
     workspace: { type: "string" },
     yes: { type: "boolean", default: false },
-    role: { type: "string", default: "executor" },
+    autonomy: { type: "string", default: "3" },
+    "no-plan": { type: "boolean", default: false },
+    "no-verify": { type: "boolean", default: false },
     "max-steps": { type: "string", default: "30" },
+    "max-cost": { type: "string", default: "2" },
+    resume: { type: "string" },
   },
 });
 
 const goal = positionals.join(" ") || (values.preset ? PRESETS[values.preset] : undefined);
-if (!goal) {
+if (!goal && !values.resume) {
   console.error(`Give a goal or --preset (${Object.keys(PRESETS).join(", ")}).`);
   process.exit(2);
 }
-const role = Role.parse(values.role);
+const autonomy = Number(values.autonomy);
+if (![0, 1, 2, 3, 4].includes(autonomy)) {
+  console.error("--autonomy must be 0-4");
+  process.exit(2);
+}
 
 const configPath = findConfig();
 loadEnv({ path: join(dirname(configPath), ".env"), quiet: true });
-const registry = new ProviderRegistry(loadModelsConfig(configPath));
-if (registry.chain(role).length === 0) {
-  console.error(`No API key for any "${role}" model. Copy .env.example to .env and add MISTRAL_API_KEY and/or NVIDIA_API_KEY.`);
+const config = loadModelsConfig(configPath);
+const registry = new ProviderRegistry(config);
+if (registry.chain("executor").length === 0) {
+  console.error('No API key for any "executor" model. Copy .env.example to .env and add MISTRAL_API_KEY and/or NVIDIA_API_KEY.');
   process.exit(2);
 }
 
 const workspace = resolve(values.workspace ?? join(tmpdir(), `kira-spike-${Date.now()}`));
 await mkdir(workspace, { recursive: true });
-
-// Checkpoints: a temp workspace gets `git init`; a user folder is never initialized behind their back.
-const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}`;
-let checkpoints: { manager: CheckpointManager; runId: string } | undefined;
-try {
-  checkpoints = { manager: await CheckpointManager.open(workspace, { initIfMissing: !values.workspace }), runId };
-} catch {
-  console.warn(`[kira] ${workspace} is not a git repository: running WITHOUT checkpoints or rewind.`);
-}
 
 // ---- interrupt handling ------------------------------------------------
 const controller = new AbortController();
@@ -97,8 +103,9 @@ const approver: Approver = async (req, signal) => {
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(`[gate] ${req.category}: ${req.summary}\n       allow? [y/N] `, { signal });
-    return /^y(es)?$/i.test(answer.trim());
+    const answer = await rl.question(`[gate] ${req.category}: ${req.summary}\n       allow? [y/N, or "n: reason"] `, { signal });
+    const m = answer.trim().match(/^(y(es)?|n(o)?)\s*(?::\s*(.*))?$/i);
+    return { allow: !!m && /^y/i.test(m[1]!), ...(m?.[4] ? { note: m[4] } : {}) };
   } finally {
     rl.close();
   }
@@ -107,7 +114,29 @@ const approver: Approver = async (req, signal) => {
 // ---- output ------------------------------------------------------------
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-const onEvent = (e: AgentEvent) => {
+const onEvent = (k: KiraEvent) => {
+  switch (k.type) {
+    case "state":
+      console.log(dim(`[state] ${k.state}${k.detail ? `: ${k.detail}` : ""}`));
+      return;
+    case "plan":
+      console.log(dim(`[plan] ${k.steps.map((s) => `${s.status === "done" ? "✓" : s.status === "active" ? "▶" : "·"} ${s.title}`).join("  ")}`));
+      return;
+    case "autonomy":
+      console.log(bold(`[autonomy] now level ${k.level}: ${k.reason}`));
+      return;
+    case "verification":
+      for (const g of k.report.gates) console.log(`  [${g.level}] ${g.status.toUpperCase()} ${g.name}: ${g.summary}`);
+      return;
+    case "memory":
+      console.log(dim(`[memory] ${k.items.map((i) => `${i.kind}:${i.title}`).join(" | ")}`));
+      return;
+    case "agent":
+      break;
+    default:
+      return;
+  }
+  const e = k.event;
   switch (e.type) {
     case "step":
       console.log(dim(`\n── ${e.text} ──`));
@@ -124,34 +153,44 @@ const onEvent = (e: AgentEvent) => {
     case "tool_result":
       console.log(dim(`  ← ${e.text}`));
       break;
+    case "checkpoint":
+    case "budget":
+      break;
     default:
       console.log(`  ! ${e.text}`);
   }
 };
 
-console.log(`[kira] workspace: ${workspace}${checkpoints ? ` (checkpoints: refs/kira/checkpoints/${runId}/*)` : ""}`);
-console.log(`[kira] role: ${role} → ${registry.chain(role).map((r) => `${r.provider}/${r.model}`).join(" → ")}`);
-console.log(`[kira] goal: ${goal}`);
+const memory = await openMemory(workspace, registry, config);
+console.log(`[kira] workspace: ${workspace}`);
+console.log(`[kira] executor: ${registry.chain("executor").map((r) => `${r.provider}/${r.model}`).join(" → ")}`);
+console.log(`[kira] goal: ${goal ?? `(resuming ${values.resume})`}`);
 
-const started = Date.now();
-const result = await runAgent((req, signal, onFallback) => registry.chat(role, req, signal, onFallback), {
-  goal,
-  system: systemPrompt({ workspace, platform: process.platform }),
-  tools: PHASE0_TOOLS,
-  ctx: { workspace, gate: new Gate(approver), background: new BackgroundManager(), log: (l) => console.log(dim(`    ${l}`)) },
+const report = await runSession({
+  goal: goal ?? "",
+  workspace,
+  chatFor: (role) => (req, signal, onFallback) => registry.chat(role, req, signal, onFallback),
+  approver,
   signal: controller.signal,
-  maxSteps: Number(values["max-steps"]),
+  autonomy: autonomy as AutonomyLevel,
+  plan: !values["no-plan"],
+  initGit: !values.workspace,
+  limits: { maxSteps: Number(values["max-steps"]), maxCostUsd: Number(values["max-cost"]) },
+  pricing: config.pricing,
   onEvent,
-  checkpoints,
+  verifier: values["no-verify"] ? undefined : createVerifier({ workspace, registry }),
+  memory,
+  ...(values.resume ? { resumeRunId: values.resume } : {}),
 });
+memory.close();
 
-const secs = ((Date.now() - started) / 1000).toFixed(0);
-console.log(`\n${bold(`[kira] ${result.status.toUpperCase()}`)} after ${result.steps} steps, ${secs}s`);
-console.log(result.summary);
+console.log(`\n${bold(`[kira] ${report.status.toUpperCase()}`)} after ${report.steps} steps, ${(report.durationMs / 1000).toFixed(0)}s`);
+console.log(report.summary);
 console.log(
   dim(
-    `tokens: ${result.usage.promptTokens} in / ${result.usage.completionTokens} out · malformed calls: ${result.malformedCalls} · ` +
-      `models: ${[...new Set(result.models.map((m) => `${m.provider}/${m.model}`))].join(", ")}`,
+    `cost: $${report.budget.costUsd.toFixed(4)} · tokens: ${report.budget.tokens} · malformed calls: ${report.malformedCalls} · ` +
+      `fallbacks: ${report.fallbacks} · models: ${report.models.join(", ")}`,
   ),
 );
-process.exit(result.status === "done" ? 0 : 1);
+console.log(dim(`report: ${join(report.runDir ?? "", "report.md")}`));
+process.exit(report.status === "done" ? 0 : 1);

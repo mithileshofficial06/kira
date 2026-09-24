@@ -9,12 +9,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check-models": "tsx src/scripts/check-models.ts",
-    "spike": "tsx src/scripts/spike.ts"
+    "spike": "tsx src/scripts/spike.ts",
+    "recall-probe": "tsx src/scripts/recall-probe.ts",
+    "daemon": "tsx src/daemon/main.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.3",
     "node-pty": "^1.1.0",
     "openai": "^7.23.0",
+    "playwright-core": "^1.63.0",
+    "vscode-jsonrpc": "^9.0.2",
     "zod": "^4.6.5"
   },
   "devDependencies": {

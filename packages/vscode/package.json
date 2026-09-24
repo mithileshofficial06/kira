@@ -1,0 +1,126 @@
+{
+  "name": "kira-agent",
+  "displayName": "Kira",
+  "description": "Autonomous engineering agent: unattended runs you can interrupt, rewind and verify, with project memory.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "kira-dev",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "kira.start",
+        "title": "Start a Run",
+        "category": "Kira",
+        "icon": "$(play)"
+      },
+      {
+        "command": "kira.stop",
+        "title": "Stop",
+        "category": "Kira",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "kira.flightDeck",
+        "title": "Open Flight Deck",
+        "category": "Kira",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "kira.leftOff",
+        "title": "Where Did We Leave Off?",
+        "category": "Kira"
+      },
+      {
+        "command": "kira.remember",
+        "title": "Remember…",
+        "category": "Kira"
+      },
+      {
+        "command": "kira.restartDaemon",
+        "title": "Restart Daemon",
+        "category": "Kira"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kira.stop",
+        "key": "ctrl+alt+end",
+        "mac": "cmd+alt+end"
+      },
+      {
+        "command": "kira.flightDeck",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k"
+      }
+    ],
+    "configuration": {
+      "title": "Kira",
+      "properties": {
+        "kira.autonomy": {
+          "type": "number",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "enumDescriptions": [
+            "Observe: read and answer only",
+            "Propose: approve every change",
+            "Step: approve each step",
+            "Run: pause only at hard gates",
+            "Trust: scratch directories only"
+          ],
+          "default": 3,
+          "description": "Starting autonomy level. Kira lowers it on its own when it sees objective trouble."
+        },
+        "kira.nodePath": {
+          "type": "string",
+          "default": "node",
+          "description": "Node.js 22.13+ used to run the Kira daemon (not VS Code's bundled runtime: the daemon uses native node-pty)."
+        },
+        "kira.daemonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the daemon entry (dist/daemon/main.js). Empty: use the daemon package next to this extension."
+        },
+        "kira.maxCostUsd": {
+          "type": "number",
+          "default": 2,
+          "description": "Per-run cost ceiling in USD. The run halts when it is reached."
+        },
+        "kira.verify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the verification ladder (typecheck, build, tests, boot, browser, critic) before accepting 'done'."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-jsonrpc": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/vscode": "~1.100.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}
