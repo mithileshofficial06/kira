@@ -61,11 +61,16 @@ export class CheckpointManager {
     return new CheckpointManager(workspace, gitDir);
   }
 
-  /** Operations that use the private index run one at a time (a diff for the UI may overlap a checkpoint). */
-  private tail: Promise<unknown> = Promise.resolve();
+  /**
+   * Operations that use the private index run one at a time per repository,
+   * across every CheckpointManager in the process: the runner's live diff,
+   * the next step's checkpoint and the verifier's diff all share one index.
+   */
+  private static readonly tails = new Map<string, Promise<unknown>>();
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.tail.then(fn, fn);
-    this.tail = next.catch(() => undefined);
+    const key = this.gitDir.toLowerCase();
+    const next = (CheckpointManager.tails.get(key) ?? Promise.resolve()).then(fn, fn);
+    CheckpointManager.tails.set(key, next.catch(() => undefined));
     return next;
   }
 
@@ -173,11 +178,13 @@ export class CheckpointManager {
    * Unified diff from a commit (usually a checkpoint) to the working tree as it is now.
    * Used for the Flight Deck's live diff and for the critic's cold review.
    */
-  diffFrom(sha: string, opts: { maxChars?: number } = {}): Promise<WorkingDiff> {
+  diffFrom(sha: string, opts: { maxChars?: number; exclude?: string[] } = {}): Promise<WorkingDiff> {
     return this.exclusive(async () => {
       const tree = await this.snapshotTree();
-      const out = await this.run(["diff", "--no-color", "--no-ext-diff", "--no-renames", sha, tree]);
-      const names = await this.run(["diff", "--name-status", "--no-renames", "-z", sha, tree]);
+      // Glob pathspecs to leave out, e.g. "**/package-lock.json".
+      const paths = opts.exclude?.length ? ["--", ".", ...opts.exclude.map((g) => `:(exclude,glob)${g}`)] : [];
+      const out = await this.run(["diff", "--no-color", "--no-ext-diff", "--no-renames", sha, tree, ...paths]);
+      const names = await this.run(["diff", "--name-status", "--no-renames", "-z", sha, tree, ...paths]);
       const parts = names.split("\0").filter(Boolean);
       const files: { status: string; path: string }[] = [];
       for (let i = 0; i + 1 < parts.length; i += 2) files.push({ status: parts[i]!, path: parts[i + 1]! });

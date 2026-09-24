@@ -63,6 +63,17 @@ export interface LadderInput {
 
 const URL_PATTERN = /https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?[^\s]*/i;
 const ALL: LadderLevel[] = ["L0", "L1", "L2", "L3", "L4", "L5"];
+/** Changes the critic is told about but does not read line by line. */
+const REVIEW_NOISE = [
+  "**/package-lock.json",
+  "**/pnpm-lock.yaml",
+  "**/yarn.lock",
+  "**/bun.lockb",
+  "**/dist/**",
+  "**/build/**",
+  "**/*.min.js",
+  "**/*.map",
+];
 
 interface PackageJson {
   scripts?: Record<string, string>;
@@ -194,17 +205,19 @@ export async function runLadder(input: LadderInput, deps: LadderDeps): Promise<L
       concerns.push("L5 was skipped: no checkpoint to diff against");
       gates.push({ level: "L5", name: "critic", status: "skip", summary: "no diff available", durationMs: 0 });
     } else {
-      const stubs = findStubs(diff.patch);
+      // The critic reads source, not lockfiles or build output: a package-lock.json alone can fill its whole budget.
+      const review = await checkpoints!.diffFrom(input.baseSha!, { maxChars: 120_000, exclude: REVIEW_NOISE });
+      const hidden = diff.files.filter((f) => !review.files.some((r) => r.path === f.path)).map((f) => `${f.status} ${f.path}`);
+      const stubs = findStubs(review.patch);
       const choice = deps.critic?.(input.executor);
       const blocking = stubs.map((s) => `${s.file}:${s.line} looks like a stub (${s.rule}): ${s.text}`);
       let criticLine = "no critic model configured";
       if (choice) {
         try {
-          const v = await critique(
-            choice.chat,
-            { goal: input.goal, claim: input.claim, patch: diff.patch, gateSummary: gatesLine(gates), stubs },
-            input.signal,
-          );
+          const patch = hidden.length
+            ? `${review.patch}\n\n(Not shown: ${hidden.length} lockfile/generated file change(s): ${hidden.slice(0, 20).join(", ")})`
+            : review.patch;
+          const v = await critique(choice.chat, { goal: input.goal, claim: input.claim, patch, gateSummary: gatesLine(gates), stubs }, input.signal);
           blocking.push(...v.blocking);
           concerns.push(...v.concerns);
           criticLine = `${v.model ?? "critic"} ${v.pass ? "found no blocking issue" : `raised ${v.blocking.length} blocking issue(s)`}`;
@@ -223,7 +236,7 @@ export async function runLadder(input: LadderInput, deps: LadderDeps): Promise<L
         status: blocking.length ? "fail" : "pass",
         summary: blocking.length
           ? `${blocking.length} blocking issue(s): ${blocking[0]}${blocking.length > 1 ? " …" : ""}`
-          : `${diff.files.length} changed file(s) reviewed; ${criticLine}; no stubs found`,
+          : `${review.files.length} changed file(s) reviewed${hidden.length ? ` (+${hidden.length} lockfile/generated not read)` : ""}; ${criticLine}; no stubs found`,
         ...(blocking.length ? { details: blocking.map((b) => `- ${b}`).join("\n") } : {}),
         durationMs: Date.now() - started,
       });

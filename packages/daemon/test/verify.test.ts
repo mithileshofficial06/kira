@@ -240,7 +240,7 @@ describe("runner + verifier", () => {
       maxVerifyRounds: 3,
     });
     expect(report.status).toBe("failed");
-    expect(report.verification?.round).toBe(3);
+    expect(report.verification?.round, report.summary).toBe(3);
     expect(report.autonomy.downgrades.some((d) => /two consecutive verification failures/.test(d.reason))).toBe(true);
   }, 60_000);
 });
@@ -280,4 +280,31 @@ describe.skipIf(!HAS_KEYS)("live critic (needs API keys)", () => {
     expect(v.pass, JSON.stringify(v)).toBe(false);
     expect(v.blocking.join(" ")).toMatch(/computeTax|tax|stub|TODO/i);
   }, 120_000);
+});
+
+describe("critic diff", () => {
+  it("leaves lockfiles out of the critic's diff but tells it they changed", async () => {
+    await put({ "README.md": "# x\n" });
+    const cm = await CheckpointManager.open(ws);
+    const base = await cm.create("r", 1);
+    await put({
+      "app/package-lock.json": JSON.stringify({ lock: "x".repeat(200_000) }),
+      "app/src/App.tsx": "export const App = () => <p>{new Date().toDateString()}</p>;\n",
+    });
+    const seen: ChatMessage[][] = [];
+    const critic: ChatFn = async function* (req) {
+      seen.push(req.messages);
+      yield { type: "text" as const, delta: '{"verdict":"pass","blocking":[],"concerns":[]}' };
+      yield { type: "done" as const, finishReason: "stop" };
+    };
+    const report = await runLadder(
+      { runId: "lock", round: 1, goal: "show the date", claim: "done", baseSha: base.sha, executor: "mistral/x", signal: new AbortController().signal },
+      { workspace: ws, levels: ["L5"], critic: () => ({ chat: critic, crossFamily: true, chain: [] }) },
+    );
+    const prompt = seen[0]!.at(-1)!.content!;
+    expect(prompt).toContain("+export const App");
+    expect(prompt).not.toContain("xxxxxxxxxx");
+    expect(prompt).toContain("Not shown: 1 lockfile/generated file change(s): A app/package-lock.json");
+    expect(report.gates[0]!.summary).toMatch(/1 changed file\(s\) reviewed \(\+1 lockfile\/generated not read\)/);
+  });
 });
