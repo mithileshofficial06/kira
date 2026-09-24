@@ -65,6 +65,9 @@ const daemon = new KiraDaemon({
   memory,
   initGit: values["init-git"],
   log,
+  ...(process.env[config.providers.mistral?.apiKeyEnv ?? "MISTRAL_API_KEY"]?.trim()
+    ? { voice: { mistralApiKey: process.env[config.providers.mistral?.apiKeyEnv ?? "MISTRAL_API_KEY"]!.trim() } }
+    : {}),
 });
 await daemon.listen();
 process.stdout.write(`KIRA_DAEMON_READY ${pipe}\n`);

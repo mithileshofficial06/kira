@@ -27,6 +27,7 @@ import type { KiraMemory } from "../memory/run-memory.js";
 import { MemoryStore } from "../memory/store.js";
 import type { ApprovalAnswer, Approver } from "../tools/index.js";
 import { AbortedError } from "../util/abort.js";
+import { p50, VoiceBridge, type VoiceHost, type VoiceOptions } from "../voice/bridge.js";
 import { emptyDeck, reduceDeck, type DeckState } from "./deck.js";
 import {
   Methods,
@@ -39,6 +40,7 @@ import {
   type RememberParams,
   type StartParams,
   type StartResult,
+  type VoiceStatus,
 } from "./protocol.js";
 
 export interface DaemonOptions {
@@ -53,6 +55,8 @@ export interface DaemonOptions {
   initGit?: boolean;
   defaults?: { autonomy?: AutonomyLevel; plan?: boolean; verify?: boolean; maxSteps?: number; maxCostUsd?: number };
   log?: (line: string) => void;
+  /** Enables voice/start: the sidecar's settings (the Mistral key for Voxtral, python path). */
+  voice?: Omit<VoiceOptions, "log" | "onVoiceEvent">;
 }
 
 /** A pipe name unique to this workspace and daemon instance. */
@@ -103,6 +107,7 @@ export class KiraDaemon {
       this.current.controller.abort("daemon shutting down");
       await this.current.done.catch(() => undefined);
     }
+    await this.voice?.stop();
     for (const c of this.clients) c.conn.dispose();
     this.clients.clear();
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
@@ -161,11 +166,47 @@ export class KiraDaemon {
       }),
     );
     conn.onRequest(Methods.remember, authed((p: RememberParams) => this.remember(p)));
+    conn.onRequest(Methods.voiceStart, authed(() => this.voiceStart()));
+    conn.onRequest(Methods.voiceStop, authed(() => this.voiceStop()));
+    conn.onRequest(Methods.voiceStatus, authed(() => this.voiceStatus()));
     conn.listen();
+  }
+
+  // ---- VoiceHost: what the voice bridge (and the headless CLI) drive -----------------
+  private readonly subscribers = new Set<(e: KiraEvent) => void>();
+  onEvent(fn: (e: KiraEvent) => void): () => void {
+    this.subscribers.add(fn);
+    return () => this.subscribers.delete(fn);
+  }
+  deckState(): DeckState {
+    return this.deck;
+  }
+  startRun(goal: string, extra: Omit<StartParams, "goal"> = {}): StartResult {
+    return this.start({ ...extra, goal });
+  }
+  stopRun(): Promise<{ stopped: boolean }> {
+    return this.stop();
+  }
+  approveRequest(id: string, allow: boolean, note?: string): { ok: boolean } {
+    return this.approve({ id, allow, ...(note ? { note } : {}) });
+  }
+  async leftOffText(): Promise<string> {
+    return this.opts.memory ? (await this.opts.memory.leftOff(new AbortController().signal)).text : "Memory is not enabled.";
+  }
+  /** Done when the current run (if any) has finished. */
+  async idle(): Promise<void> {
+    await this.current?.done.catch(() => undefined);
   }
 
   private emit(event: KiraEvent): void {
     this.deck = reduceDeck(this.deck, event);
+    for (const s of this.subscribers) {
+      try {
+        s(event);
+      } catch (err) {
+        this.opts.log?.(`event subscriber failed: ${(err as Error).message}`);
+      }
+    }
     const note = { seq: ++this.seq, event };
     for (const c of this.clients) if (c.authed) void c.conn.sendNotification(Methods.event, note).catch(() => undefined);
   }
@@ -252,6 +293,52 @@ export class KiraDaemon {
       createdAt: i.createdAt,
       ...(i.kind === "adr" ? { adrId: MemoryStore.adrId(i) } : {}),
     }));
+  }
+
+  // ---- voice ------------------------------------------------------------------------
+  private voice: VoiceBridge | undefined;
+  private voiceError: string | undefined;
+
+  async voiceStart(): Promise<VoiceStatus> {
+    if (this.voice?.running) return this.voiceStatus();
+    if (!this.opts.voice) throw new ResponseError(-32004, "voice is not configured: set MISTRAL_API_KEY for Voxtral");
+    const host: VoiceHost = {
+      deck: () => this.deck,
+      startRun: (goal) => this.startRun(goal),
+      stopRun: () => this.stopRun(),
+      approve: (id, allow, note) => this.approveRequest(id, allow, note),
+      leftOff: () => this.leftOffText(),
+      onEvent: (fn) => this.onEvent(fn),
+    };
+    this.voice = new VoiceBridge(host, { ...this.opts.voice, log: this.opts.log });
+    this.voiceError = undefined;
+    try {
+      await this.voice.start();
+    } catch (err) {
+      this.voiceError = (err as Error).message;
+      this.voice = undefined;
+      throw new ResponseError(-32005, `voice failed to start: ${this.voiceError}`);
+    }
+    return this.voiceStatus();
+  }
+
+  async voiceStop(): Promise<VoiceStatus> {
+    await this.voice?.stop();
+    this.voice = undefined;
+    return this.voiceStatus();
+  }
+
+  voiceStatus(): VoiceStatus {
+    const v = this.voice;
+    const acks = v?.latencies.filter((l) => l.kind === "ack").map((l) => l.ms) ?? [];
+    const med = p50(acks);
+    return {
+      running: !!v?.running,
+      ...(v?.ready ? { input: v.ready.input, output: v.ready.output, wake: v.ready.wake, voice: v.ready.voice } : {}),
+      ...(med !== undefined ? { ackP50Ms: med } : {}),
+      samples: acks.length,
+      ...(this.voiceError ? { error: this.voiceError } : {}),
+    };
   }
 
   private async remember(p: RememberParams): Promise<{ id: number }> {

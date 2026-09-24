@@ -11,7 +11,8 @@
     "check-models": "tsx src/scripts/check-models.ts",
     "spike": "tsx src/scripts/spike.ts",
     "recall-probe": "tsx src/scripts/recall-probe.ts",
-    "daemon": "tsx src/daemon/main.ts"
+    "daemon": "tsx src/daemon/main.ts",
+    "kira": "tsx src/scripts/kira.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.3",

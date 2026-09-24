@@ -56,6 +56,18 @@ export interface RememberParams {
   text: string;
 }
 
+export interface VoiceStatus {
+  running: boolean;
+  input?: string;
+  output?: string;
+  wake?: string;
+  voice?: string;
+  /** Median end-of-speech to first audible word, ms (spec: ≤2000). */
+  ackP50Ms?: number;
+  samples: number;
+  error?: string;
+}
+
 /** Every notification carries a sequence number so a reconnecting client can tell what it missed. */
 export interface EventNotification {
   seq: number;
@@ -73,6 +85,9 @@ export const Methods = {
   memoryReject: "memory/reject",
   memoryKeep: "memory/keep",
   remember: "memory/remember",
+  voiceStart: "voice/start",
+  voiceStop: "voice/stop",
+  voiceStatus: "voice/status",
   shutdown: "kira/shutdown",
   /** Notification, daemon -> client. */
   event: "kira/event",

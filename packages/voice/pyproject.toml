@@ -1,0 +1,12 @@
+[project]
+name = "kira-voice"
+version = "0.0.1"
+description = "Kira voice sidecar: wake word, VAD, Voxtral STT/TTS, barge-in"
+requires-python = ">=3.11"
+dependencies = ["sounddevice", "numpy", "onnxruntime", "faster-whisper"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
