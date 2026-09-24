@@ -15,7 +15,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "check-models": "npm run check-models -w @kira/daemon",
-    "spike": "npm run spike -w @kira/daemon"
+    "spike": "npm run spike -w @kira/daemon --"
   },
   "allowScripts": {
     "node-pty@1.1.0": true,
