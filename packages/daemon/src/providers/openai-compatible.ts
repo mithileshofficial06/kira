@@ -79,6 +79,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
     yield { type: "done", finishReason, usage };
   }
 
+  async embed(texts: string[], model: string, signal: AbortSignal): Promise<number[][]> {
+    await this.limiter.acquire(signal);
+    try {
+      const res = await this.client.embeddings.create({ model, input: texts, encoding_format: "float" }, { signal });
+      return [...res.data].sort((a, b) => a.index - b.index).map((d) => d.embedding as number[]);
+    } catch (err) {
+      throw this.wrap(err, signal);
+    }
+  }
+
   async listModels(signal: AbortSignal): Promise<string[]> {
     await this.limiter.acquire(signal);
     try {

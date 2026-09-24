@@ -41,5 +41,6 @@ export type ChatEvent =
 export interface ModelProvider {
   readonly id: ProviderId;
   chat(req: ChatRequest, signal: AbortSignal): AsyncIterable<ChatEvent>;
+  embed(texts: string[], model: string, signal: AbortSignal): Promise<number[][]>;
   listModels(signal: AbortSignal): Promise<string[]>;
 }
