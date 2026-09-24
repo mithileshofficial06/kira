@@ -25,6 +25,9 @@ from .vad import Segmenter, Utterance
 from .wake import is_stop, speakable, split_wake, word_count
 
 LISTEN_WINDOW_S = 8.0
+#: People pause after "Kira," before the task. Wait this long before answering "Yes?",
+#: so "Kira, ... build the login page" gets one acknowledgement, not a "Yes?" mid-sentence.
+YES_GRACE_S = 0.7
 
 
 class Transcriber(Protocol):
@@ -62,6 +65,8 @@ class Engine:
         self.segmenter, self.local, self.cloud, self.speaker, self.emit, self.clock = segmenter, local, cloud, speaker, emit, clock
         self.running = False  # a Kira run is in progress (set by the daemon)
         self.listening_until = 0.0
+        self._utterance_seq = 0
+        self._stt_ms = 0.0
         self.stats = EngineStats()
         self._work: queue.Queue[Utterance | None] = queue.Queue()
         self._worker = threading.Thread(target=self._drain, name="kira-voice-stt", daemon=True)
@@ -98,17 +103,33 @@ class Engine:
                 self.emit({"type": "log", "level": "error", "msg": f"utterance failed: {e!r}"})
 
     def _latency(self, kind: str, end_of_speech: float) -> Callable[[float], None]:
+        stt_ms = self._stt_ms
+
         def done(first_audio_at: float) -> None:
-            self.emit({"type": "latency", "kind": kind, "ms": round((first_audio_at - end_of_speech) * 1000.0, 1)})
+            self.emit({"type": "latency", "kind": kind, "ms": round((first_audio_at - end_of_speech) * 1000.0, 1), "sttMs": round(stt_ms, 1)})
 
         return done
+
+    def _yes_after_grace(self, seq: int, end_of_speech: float) -> None:
+        """Answer a bare "Kira" with "Yes?" only if nothing else was said in the meantime."""
+
+        def fire() -> None:
+            if seq == self._utterance_seq and not self.segmenter.in_speech and self.clock() < self.listening_until:
+                self.speaker.say_cached("Yes?", self._latency("ack", end_of_speech))
+
+        t = threading.Timer(YES_GRACE_S, fire)
+        t.daemon = True
+        t.start()
 
     # ---- one utterance -----------------------------------------------------------
     def handle(self, u: Utterance) -> None:
         if u.duration_s < 0.25:
             return
+        self._utterance_seq += 1
         speaking = self.speaker.playing
+        t0 = time.perf_counter()
         heard = self.local.transcribe(u.audio)
+        self._stt_ms = (time.perf_counter() - t0) * 1000.0
         woke, rest = split_wake(heard)
         eos_epoch = protocol.now() - (self.clock() - u.end_of_speech) * 1000.0
 
@@ -131,7 +152,7 @@ class Engine:
             self.emit({"type": "wake", "at": eos_epoch})
             if word_count(rest) < 2:
                 self.listening_until = self.clock() + LISTEN_WINDOW_S
-                self.speaker.say_cached("Yes?", self._latency("ack", u.end_of_speech))
+                self._yes_after_grace(self._utterance_seq, u.end_of_speech)
                 return
 
         self.listening_until = 0.0

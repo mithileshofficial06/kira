@@ -1,6 +1,9 @@
 """Engine rules with fake audio, transcribers and speaker: fast and offline."""
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -52,7 +55,7 @@ def make(local: Script, cloud: Script | None = None):
     events: list[dict] = []
     clock = Clock()
     speaker = FakeSpeaker()
-    engine = Engine(segmenter=None, local=local, cloud=cloud, speaker=speaker, emit=events.append, clock=clock)  # type: ignore[arg-type]
+    engine = Engine(segmenter=SimpleNamespace(in_speech=False), local=local, cloud=cloud, speaker=speaker, emit=events.append, clock=clock)  # type: ignore[arg-type]
     return engine, speaker, events, clock
 
 
@@ -96,10 +99,24 @@ def test_bare_wake_word_listens_for_the_next_sentence():
     local, cloud = Script("Kira.", "fix the failing test in billing"), Script("fix the failing test in billing.")
     e, sp, ev, clock = make(local, cloud)
     e.handle(utt(0.6))
-    assert sp.said == ["Yes?"] and types(ev) == ["wake"]
+    assert sp.said == [] and types(ev) == ["wake"]
+    time.sleep(0.9)  # nobody kept talking: now it asks
+    assert sp.said == ["Yes?"]
     clock.t = 3.0
     e.handle(utt())
     assert types(ev) == ["wake", "utterance"] and ev[-1]["text"] == "fix the failing test in billing."
+
+
+def test_a_pause_after_the_wake_word_gets_one_acknowledgement_not_two():
+    # "Kira, ... build the login page": the pause splits it into two utterances.
+    local, cloud = Script("Kira,", "build the login page"), Script("build the login page.")
+    e, sp, ev, clock = make(local, cloud)
+    e.handle(utt(0.5))
+    clock.t = 0.5
+    e.handle(utt())
+    time.sleep(0.9)
+    assert sp.said == ["On it."]
+    assert types(ev) == ["wake", "utterance"] and ev[-1]["text"] == "build the login page."
 
 
 def test_listening_window_expires():
