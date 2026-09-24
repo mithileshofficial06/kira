@@ -13,7 +13,14 @@ let context: vscode.ExtensionContext;
 /** Approvals already shown as a notification, so each is asked once. */
 const notified = new Set<string>();
 
-export function activate(ctx: vscode.ExtensionContext): void {
+/** Read-only view for integration tests and other extensions. */
+export interface KiraApi {
+  deck(): DaemonClient["deck"] | undefined;
+  daemonConnected(): boolean;
+  panelOpen(): boolean;
+}
+
+export function activate(ctx: vscode.ExtensionContext): KiraApi {
   context = ctx;
   output = vscode.window.createOutputChannel("Kira");
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -36,6 +43,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }),
     { dispose: () => client?.dispose() },
   );
+  return { deck: () => client?.deck, daemonConnected: () => !!client, panelOpen: () => !!FlightDeckPanel.current };
 }
 
 export function deactivate(): void {
