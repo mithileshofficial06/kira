@@ -1,5 +1,5 @@
 {
-  "$comment": "Model IDs change often. Run `npm run check-models` to verify every entry against the live catalogs.",
+  "$comment": "Model IDs and prices change often. Run `npm run check-models` to verify IDs; check prices (USD per 1M tokens) in the Mistral console. NIM hosted is free for development.",
   "providers": {
     "mistral": {
       "baseURL": "https://api.mistral.ai/v1",
@@ -31,5 +31,25 @@
       { "provider": "mistral", "model": "mistral-small-latest" },
       { "provider": "nim", "model": "meta/llama-3.1-8b-instruct" }
     ]
+  },
+  "pricing": {
+    "mistral:mistral-medium-latest": { "inputPerM": 0.4, "outputPerM": 2.0 },
+    "mistral:mistral-large-latest": { "inputPerM": 0.5, "outputPerM": 1.5 },
+    "mistral:devstral-latest": { "inputPerM": 0.4, "outputPerM": 2.0 },
+    "mistral:mistral-small-latest": { "inputPerM": 0.1, "outputPerM": 0.3 },
+    "mistral:mistral-embed": { "inputPerM": 0.1, "outputPerM": 0 },
+    "mistral:codestral-embed": { "inputPerM": 0.15, "outputPerM": 0 },
+    "nim:qwen/qwen3-coder-480b-a35b-instruct": { "inputPerM": 0, "outputPerM": 0 },
+    "nim:moonshotai/kimi-k2-instruct": { "inputPerM": 0, "outputPerM": 0 },
+    "nim:meta/llama-3.1-8b-instruct": { "inputPerM": 0, "outputPerM": 0 }
+  },
+  "memory": {
+    "codeEmbed": { "provider": "mistral", "model": "codestral-embed" },
+    "textEmbed": { "provider": "mistral", "model": "mistral-embed" },
+    "rerank": {
+      "provider": "nim",
+      "model": "nvidia/llama-3.2-nv-rerankqa-1b-v2",
+      "url": "https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-3_2-nv-rerankqa-1b-v2/reranking"
+    }
   }
 }

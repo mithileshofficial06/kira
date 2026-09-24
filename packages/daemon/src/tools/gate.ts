@@ -1,17 +1,32 @@
 /**
  * The autonomy gate: the single chokepoint every tool call passes through
- * before it runs (spec §8, invariant 3). Phase 0 implements the hard gates and
- * the credential deny rule; autonomy levels and scope tracking arrive in Phase 1.
+ * before it runs (spec §8, invariant 3). It applies, in order: the credential
+ * deny rules, the autonomy level, the hard gates, and declared-scope tracking.
+ * Gates are code, not prompts, so an injected instruction still hits them.
  */
+import { Autonomy, LEVEL_NAMES } from "../control/autonomy.js";
 
 export type GateDecision = { allow: true } | { allow: false; reason: string };
+
+/** What a tool does to the world. Decides how each autonomy level treats it. */
+export type ToolEffect = "read" | "write" | "exec";
+
+/** "propose": level 1 asks before every write or command. "step": level 2 asks between steps. */
+export type GateCategory = HardGateCategory | "propose" | "step";
 
 export interface GateRequest {
   tool: string;
   /** One-line description of the action, shown to the human. */
   summary: string;
   /** Why this is gated. */
-  category: HardGateCategory;
+  category: GateCategory;
+}
+
+/** A human decision. The note ("no, write it by hand") is what memory turns into an ADR. */
+export interface GateDecisionRecord extends GateRequest {
+  allow: boolean;
+  note?: string;
+  at: string;
 }
 
 export type HardGateCategory =
@@ -23,8 +38,14 @@ export type HardGateCategory =
   | "migration"
   | "outside-repo";
 
-/** Asks the human. Resolves true to allow. Must honour the signal. */
-export type Approver = (req: GateRequest, signal: AbortSignal) => Promise<boolean>;
+export interface ApprovalAnswer {
+  allow: boolean;
+  /** Optional reason from the human, kept for the decision journal. */
+  note?: string;
+}
+
+/** Asks the human. Resolves true (or {allow: true}) to allow. Must honour the signal. */
+export type Approver = (req: GateRequest, signal: AbortSignal) => Promise<boolean | ApprovalAnswer>;
 
 interface Rule {
   category: HardGateCategory;
@@ -63,14 +84,118 @@ export function classifyCommand(command: string): { denied?: string; gated?: Har
   return hit ? { gated: hit.category } : {};
 }
 
-export class Gate {
-  constructor(private readonly approver: Approver) {}
+export interface GateOptions {
+  autonomy?: Autonomy;
+  /** Declared file scope of the plan: workspace-relative prefixes ("src/") or globs ("src/**"). */
+  scope?: string[];
+}
 
+export class Gate {
+  readonly autonomy: Autonomy;
+  scope: string[] | undefined;
+  /** Every question put to the human, with the answer. */
+  readonly decisions: GateDecisionRecord[] = [];
+  private readonly listeners = new Set<(d: GateDecisionRecord) => void>();
+  /** Commands approved at the chokepoint, so the tool's own check does not ask twice. */
+  private readonly preApproved = new Map<string, number>();
+
+  constructor(
+    private readonly approver: Approver,
+    opts: GateOptions = {},
+  ) {
+    this.autonomy = opts.autonomy ?? new Autonomy(3);
+    this.scope = opts.scope;
+  }
+
+  onDecision(fn: (d: GateDecisionRecord) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  /**
+   * The chokepoint. Called by the loop for every validated tool call before it runs.
+   * `input` is the tool's parsed arguments.
+   */
+  async authorize(tool: { name: string; effect: ToolEffect }, input: unknown, signal: AbortSignal): Promise<GateDecision> {
+    const args = (input ?? {}) as { command?: unknown; path?: unknown };
+    const command = typeof args.command === "string" ? args.command : undefined;
+    const path = typeof args.path === "string" ? args.path : undefined;
+    const level = this.autonomy.level;
+
+    if (command) {
+      const c = classifyCommand(command);
+      if (c.denied) return { allow: false, reason: `Refused: this command ${c.denied}.` };
+    }
+    if (tool.effect === "read") return { allow: true };
+    if (level === 0) {
+      return { allow: false, reason: `Autonomy level 0 (${LEVEL_NAMES[0]}): no writes or commands. Answer from what you can read.` };
+    }
+
+    const hard = command ? classifyCommand(command).gated : undefined;
+    const summary = command ?? (path ? `${tool.name} ${path}` : tool.name);
+    if (hard) {
+      const ok = await this.ask({ tool: tool.name, summary, category: hard }, signal);
+      if (!ok) return { allow: false, reason: `The human declined this ${hard} action.` };
+      const key = `${tool.name}␟${command}`;
+      this.preApproved.set(key, (this.preApproved.get(key) ?? 0) + 1);
+    } else if (level === 1) {
+      const ok = await this.ask({ tool: tool.name, summary, category: "propose" }, signal);
+      if (!ok) return { allow: false, reason: "The human declined this action (autonomy level 1: every change is proposed first)." };
+    }
+
+    if (tool.effect === "write" && path && this.scope && !inScope(path, this.scope)) {
+      this.autonomy.downgrade(`write outside the declared scope: ${path}`);
+    }
+    return { allow: true };
+  }
+
+  /** Hard-gate check used inside command tools. Skips the question if the chokepoint already asked. */
   async checkCommand(tool: string, command: string, signal: AbortSignal): Promise<GateDecision> {
     const c = classifyCommand(command);
     if (c.denied) return { allow: false, reason: `Refused: this command ${c.denied}.` };
     if (!c.gated) return { allow: true };
-    const ok = await this.approver({ tool, summary: command, category: c.gated }, signal);
+    const key = `${tool}␟${command}`;
+    const n = this.preApproved.get(key) ?? 0;
+    if (n > 0) {
+      if (n === 1) this.preApproved.delete(key);
+      else this.preApproved.set(key, n - 1);
+      return { allow: true };
+    }
+    const ok = await this.ask({ tool, summary: command, category: c.gated }, signal);
     return ok ? { allow: true } : { allow: false, reason: `The human declined this ${c.gated} action.` };
   }
+
+  /** Level 2 (step): asks before starting the next step. Always true at other levels. */
+  async confirmStep(step: number, summary: string, signal: AbortSignal): Promise<boolean> {
+    if (this.autonomy.level !== 2) return true;
+    return this.ask({ tool: "step", summary: `Step ${step} finished: ${summary}. Continue?`, category: "step" }, signal);
+  }
+
+  /** Levels 0–1: the plan itself is proposed before anything runs. */
+  async confirmPlan(steps: string[], signal: AbortSignal): Promise<boolean> {
+    return this.ask({ tool: "plan", summary: steps.map((s, i) => `${i + 1}. ${s}`).join("\n"), category: "propose" }, signal);
+  }
+
+  private async ask(req: GateRequest, signal: AbortSignal): Promise<boolean> {
+    const raw = await this.approver(req, signal);
+    const answer: ApprovalAnswer = typeof raw === "boolean" ? { allow: raw } : raw;
+    const rec: GateDecisionRecord = { ...req, allow: answer.allow, at: new Date().toISOString(), ...(answer.note ? { note: answer.note } : {}) };
+    this.decisions.push(rec);
+    for (const l of this.listeners) l(rec);
+    return answer.allow;
+  }
+}
+
+/** Matches a workspace-relative path against scope entries: plain prefixes or globs with * and **. */
+export function inScope(path: string, scope: string[]): boolean {
+  const p = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  return scope.some((entry) => {
+    const e = entry.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (!e.includes("*")) return p === e || p.startsWith(e.endsWith("/") ? e : `${e}/`);
+    const re = e
+      .split("**")
+      .map((part) => part.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*"))
+      .join(".*");
+    return new RegExp(`^${re}$`).test(p);
+  });
 }

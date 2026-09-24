@@ -14,6 +14,7 @@ async function gated(tool: string, command: string, ctx: ToolContext): Promise<T
 
 export const runCommandTool = defineTool({
   name: "run_command",
+  effect: "exec",
   description:
     "Run a shell command to completion and return its exit code and output. On Windows this is cmd.exe. " +
     "Do NOT use for servers or watchers that never exit: use start_background instead.",
@@ -27,7 +28,14 @@ export const runCommandTool = defineTool({
     if (denied) return denied;
     const dir = resolveInWorkspace(ctx.workspace, cwd ?? ".", "read");
     ctx.log(`$ ${command}`);
-    const r = await runInPty(command, { cwd: dir, timeoutMs: timeoutSeconds * 1000, signal: ctx.signal });
+    const termId = `cmd-${Date.now().toString(36)}`;
+    ctx.onTerminal?.(termId, `\r\n\x1b[36m$ ${command}\x1b[0m\r\n`);
+    const r = await runInPty(command, {
+      cwd: dir,
+      timeoutMs: timeoutSeconds * 1000,
+      signal: ctx.signal,
+      onData: ctx.onTerminal ? (d) => ctx.onTerminal!(termId, d) : undefined,
+    });
     const output = truncateMiddle(stripAnsi(r.output).trim(), MAX_OUTPUT_CHARS);
     const status = r.timedOut ? `TIMED OUT after ${timeoutSeconds}s (process tree killed)` : `exit code ${r.exitCode}`;
     ctx.log(`  -> ${status} in ${(r.durationMs / 1000).toFixed(1)}s`);
@@ -39,6 +47,7 @@ const URL_PATTERN = /https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?[^\s]*/i;
 
 export const startBackgroundTool = defineTool({
   name: "start_background",
+  effect: "exec",
   description:
     "Start a long-running process (dev server, watcher) and return once it looks ready: its output matches " +
     "readyPattern or prints a localhost URL, or waitSeconds pass. Returns an id for background_output/stop_background.",
@@ -59,7 +68,8 @@ export const startBackgroundTool = defineTool({
       return { content: `readyPattern is not a valid regex: ${readyPattern}`, isError: true };
     }
     ctx.log(`$ ${command} &`);
-    const entry = ctx.background.start(command, dir);
+    const entry = ctx.background.start(command, dir, ctx.onTerminal);
+    ctx.onTerminal?.(entry.id, `\r\n\x1b[35m$ ${command} &  (${entry.id})\x1b[0m\r\n`);
     const deadline = Date.now() + waitSeconds * 1000;
     let state = "still starting";
     while (Date.now() < deadline) {
@@ -84,6 +94,7 @@ export const startBackgroundTool = defineTool({
 
 export const backgroundOutputTool = defineTool({
   name: "background_output",
+  effect: "read",
   description: "Return the recent output of a background process and whether it is still running.",
   schema: z.object({ id: z.string() }),
   async run({ id }, ctx) {
@@ -95,6 +106,7 @@ export const backgroundOutputTool = defineTool({
 
 export const stopBackgroundTool = defineTool({
   name: "stop_background",
+  effect: "exec",
   description: "Stop a background process and its whole process tree.",
   schema: z.object({ id: z.string() }),
   async run({ id }, ctx) {
@@ -109,6 +121,7 @@ export const stopBackgroundTool = defineTool({
 
 export const httpGetTool = defineTool({
   name: "http_get",
+  effect: "read",
   description: "HTTP GET a localhost URL (e.g. a dev server) and return the status and the start of the body.",
   schema: z.object({ url: z.string().url() }),
   async run({ url }, ctx) {
@@ -133,6 +146,7 @@ export const httpGetTool = defineTool({
 
 export const finishTool = defineTool({
   name: "finish",
+  effect: "read",
   description:
     "Call when the goal is verifiably achieved, or when you cannot continue without a human decision. " +
     "Say exactly what was done, how it was verified, and anything left open. Do not claim success you did not verify.",

@@ -9,6 +9,7 @@ const MAX_READ_CHARS = 20_000;
 
 export const readFileTool = defineTool({
   name: "read_file",
+  effect: "read",
   description: "Read a text file in the workspace. Use startLine/maxLines for large files.",
   schema: z.object({
     path: z.string().describe("Workspace-relative path"),
@@ -29,6 +30,7 @@ export const readFileTool = defineTool({
 
 export const writeFileTool = defineTool({
   name: "write_file",
+  effect: "write",
   description: "Create or overwrite a text file in the workspace with the full content given. Creates parent folders.",
   schema: z.object({
     path: z.string().describe("Workspace-relative path"),
@@ -59,6 +61,7 @@ const SKIP_DIRS = new Set(["node_modules", ".git", ".kira", "dist", "build", ".n
 
 export const listDirTool = defineTool({
   name: "list_dir",
+  effect: "read",
   description: "List files and folders in a workspace directory, up to `depth` levels. Skips node_modules, .git and build output.",
   schema: z.object({
     path: z.string().optional().describe("Workspace-relative directory (default: workspace root)"),

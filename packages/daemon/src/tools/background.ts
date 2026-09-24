@@ -18,12 +18,13 @@ export class BackgroundManager {
   private readonly entries = new Map<string, Entry>();
   private next = 1;
 
-  start(command: string, cwd: string): Entry {
+  start(command: string, cwd: string, onTerminal?: (id: string, data: string) => void): Entry {
     const id = `bg${this.next++}`;
     const proc = PtyProcess.spawn(command, { cwd });
     const entry: Entry = { id, command, proc, output: "" };
     proc.onData((d) => {
       entry.output = (entry.output + stripAnsi(d)).slice(-MAX_BUFFER);
+      onTerminal?.(id, d);
     });
     this.entries.set(id, entry);
     return entry;

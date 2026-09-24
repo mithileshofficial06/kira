@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { existsSync } from "node:fs";
 import { z } from "zod";
 
 export const ProviderId = z.enum(["mistral", "nim"]);
@@ -22,9 +21,23 @@ const ModelRef = z.object({
 });
 export type ModelRef = z.infer<typeof ModelRef>;
 
+/** USD per million tokens. Missing entries cost 0 and are flagged in the report. */
+const Price = z.object({ inputPerM: z.number().nonnegative(), outputPerM: z.number().nonnegative() });
+export type Price = z.infer<typeof Price>;
+
 export const ModelsConfig = z.object({
   providers: z.record(ProviderId, ProviderConfig),
   roles: z.record(Role, z.array(ModelRef).min(1)),
+  /** Keyed "provider:model". */
+  pricing: z.record(z.string(), Price).optional(),
+  /** Embedding and rerank models for memory (spec §9.3). */
+  memory: z
+    .object({
+      codeEmbed: ModelRef.optional(),
+      textEmbed: ModelRef.optional(),
+      rerank: ModelRef.extend({ url: z.string().url() }).optional(),
+    })
+    .optional(),
 });
 export type ModelsConfig = z.infer<typeof ModelsConfig>;
 

@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { ToolSpec } from "../providers/types.js";
+import type { PlanTracker } from "../control/plan.js";
 import type { BackgroundManager } from "./background.js";
-import type { Gate } from "./gate.js";
+import type { Gate, ToolEffect } from "./gate.js";
 
 export interface ToolContext {
   /** Absolute workspace root. Every path a tool touches must resolve inside it. */
@@ -11,6 +12,10 @@ export interface ToolContext {
   background: BackgroundManager;
   /** Progress lines for the operator (terminal now, Flight Deck later). Never sent to the model. */
   log: (line: string) => void;
+  /** The executor's plan, kept current by update_plan. */
+  plan?: PlanTracker;
+  /** Raw terminal bytes (ANSI intact) for the Flight Deck's xterm mirror. `id` names the process. */
+  onTerminal?: (id: string, data: string) => void;
 }
 
 export interface ToolResult {
@@ -25,6 +30,8 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   name: string;
   description: string;
   schema: S;
+  /** How the autonomy gate treats this tool (spec §4.5). */
+  effect: ToolEffect;
   run(input: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
 }
 

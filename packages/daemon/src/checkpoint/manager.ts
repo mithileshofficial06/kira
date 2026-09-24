@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { git, GitError } from "./git.js";
 
@@ -16,6 +16,13 @@ export interface RestoreReport {
   removed: string[];
   /** Snapshot taken just before the rewind, so the rewind itself can be undone. */
   undo: Checkpoint;
+}
+
+export interface WorkingDiff {
+  /** Unified diff text, truncated for display. */
+  patch: string;
+  /** Changed files with their status letter (A/M/D/T). */
+  files: { status: string; path: string }[];
 }
 
 const REF_ROOT = "refs/kira/checkpoints";
@@ -50,7 +57,16 @@ export class CheckpointManager {
       await git(["init", "-q"], { cwd: workspace });
       gitDir = await git(["rev-parse", "--absolute-git-dir"], { cwd: workspace });
     }
+    await excludeKiraDir(gitDir);
     return new CheckpointManager(workspace, gitDir);
+  }
+
+  /** Operations that use the private index run one at a time (a diff for the UI may overlap a checkpoint). */
+  private tail: Promise<unknown> = Promise.resolve();
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.tail.then(fn, fn);
+    this.tail = next.catch(() => undefined);
+    return next;
   }
 
   private get indexEnv(): NodeJS.ProcessEnv {
@@ -91,7 +107,11 @@ export class CheckpointManager {
   }
 
   /** Snapshots the working tree as checkpoint `step` of `runId`. */
-  async create(runId: string, step: number | string, message = `kira checkpoint ${runId}/${step}`): Promise<Checkpoint> {
+  create(runId: string, step: number | string, message = `kira checkpoint ${runId}/${step}`): Promise<Checkpoint> {
+    return this.exclusive(() => this.createUnlocked(runId, step, message));
+  }
+
+  private async createUnlocked(runId: string, step: number | string, message: string): Promise<Checkpoint> {
     const tree = await this.snapshotTree();
     const previous = (await this.list(runId)).at(-1);
     const parent = previous?.sha ?? (await this.headSha());
@@ -120,11 +140,15 @@ export class CheckpointManager {
    * Makes the working tree match checkpoint `step` of `runId`. A snapshot of
    * the current state is taken first (returned as `undo`).
    */
-  async restore(runId: string, step: number): Promise<RestoreReport> {
+  restore(runId: string, step: number): Promise<RestoreReport> {
+    return this.exclusive(() => this.restoreUnlocked(runId, step));
+  }
+
+  private async restoreUnlocked(runId: string, step: number): Promise<RestoreReport> {
     const target = await this.resolve(CheckpointManager.ref(runId, step));
     if (!target) throw new Error(`No checkpoint ${runId}/${step}`);
 
-    const undo = await this.create(`${runId}-undo`, Date.now(), `kira pre-rewind snapshot of ${runId} before restoring step ${step}`);
+    const undo = await this.createUnlocked(`${runId}-undo`, Date.now(), `kira pre-rewind snapshot of ${runId} before restoring step ${step}`);
 
     // Files present now but absent at the target were created after it: delete them.
     const added = await this.run(["diff", "--name-only", "--no-renames", "-z", "--diff-filter=A", target, undo.sha]);
@@ -145,10 +169,41 @@ export class CheckpointManager {
     return { restored, removed, undo };
   }
 
+  /**
+   * Unified diff from a commit (usually a checkpoint) to the working tree as it is now.
+   * Used for the Flight Deck's live diff and for the critic's cold review.
+   */
+  diffFrom(sha: string, opts: { maxChars?: number } = {}): Promise<WorkingDiff> {
+    return this.exclusive(async () => {
+      const tree = await this.snapshotTree();
+      const out = await this.run(["diff", "--no-color", "--no-ext-diff", "--no-renames", sha, tree]);
+      const names = await this.run(["diff", "--name-status", "--no-renames", "-z", sha, tree]);
+      const parts = names.split("\0").filter(Boolean);
+      const files: { status: string; path: string }[] = [];
+      for (let i = 0; i + 1 < parts.length; i += 2) files.push({ status: parts[i]!, path: parts[i + 1]! });
+      const max = opts.maxChars ?? 200_000;
+      const patch = out.length > max ? `${out.slice(0, max)}\n... [diff truncated: ${out.length - max} more characters]` : out;
+      return { patch, files };
+    });
+  }
+
   /** Deletes every checkpoint ref of a run (and its undo snapshots). */
   async drop(runId: string): Promise<void> {
     for (const id of [runId, `${runId}-undo`]) {
       for (const c of await this.list(id)) await this.run(["update-ref", "-d", c.ref]);
     }
   }
+}
+
+/**
+ * Kira's own state (.kira/: run logs, memory) must never enter a checkpoint,
+ * nor show up in the user's `git status`. The repo-local exclude file does
+ * both without editing the user's .gitignore.
+ */
+async function excludeKiraDir(gitDir: string): Promise<void> {
+  const file = join(gitDir, "info", "exclude");
+  const current = await readFile(file, "utf8").catch(() => "");
+  if (/^\/?\.kira\/?$/m.test(current)) return;
+  await mkdir(join(gitDir, "info"), { recursive: true });
+  await appendFile(file, `${current && !current.endsWith("\n") ? "\n" : ""}/.kira/\n`);
 }

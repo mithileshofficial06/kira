@@ -36,7 +36,7 @@ export class PtyProcess {
     this.term = pty.spawn(file, args, {
       name: "xterm-256color",
       cwd: opts.cwd,
-      env: { ...process.env, ...opts.env, FORCE_COLOR: "0", NO_COLOR: "1", CI: "1" } as Record<string, string>,
+      env: { ...scrubSecrets(process.env), ...opts.env, FORCE_COLOR: "0", NO_COLOR: "1", CI: "1" } as Record<string, string>,
       cols: opts.cols ?? 160,
       rows: opts.rows ?? 40,
       // node-pty's bundled ConPTY: its kill() closes the pseudo-console directly
@@ -128,6 +128,20 @@ export class PtyProcess {
   }
 }
 
+/** Variable names that hold credentials: API keys, tokens, secrets, passwords. */
+const SECRET_NAME = /(^|_)(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)(_|$)|^KIRA_DAEMON_/i;
+
+/**
+ * Commands the agent runs never inherit credentials (spec §13): the daemon's
+ * own environment holds the provider keys, and `echo %MISTRAL_API_KEY%` would
+ * otherwise put one straight into the model's context.
+ */
+export function scrubSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) if (!SECRET_NAME.test(k)) out[k] = v;
+  return out;
+}
+
 function shellFor(command: string): [string, string | string[]] {
   if (process.platform === "win32") {
     // A single string, not argv: node-pty re-quotes argv entries on Windows.
@@ -148,6 +162,8 @@ export interface RunResult {
 export interface RunOptions extends PtySpawnOptions {
   timeoutMs?: number;
   signal: AbortSignal;
+  /** Raw output as it arrives (for a live terminal mirror). */
+  onData?: (data: string) => void;
 }
 
 /**
@@ -162,6 +178,7 @@ export async function runInPty(command: string, opts: RunOptions): Promise<RunRe
   let output = "";
   proc.onData((d) => {
     output += d;
+    opts.onData?.(d);
   });
 
   let timer: NodeJS.Timeout | undefined;

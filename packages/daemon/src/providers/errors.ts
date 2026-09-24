@@ -47,8 +47,20 @@ export function classifyProviderError(provider: string, err: unknown): unknown {
   if (status !== undefined && (status >= 500 || status === 404 || status === 408)) {
     return new ProviderUnavailableError(provider, status, message);
   }
-  if (err instanceof Error && /ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|Connection error/i.test(err.message)) {
+  if (err instanceof Error && isNetworkFailure(err)) {
     return new ProviderUnavailableError(provider, undefined, message);
   }
   return err;
+}
+
+const NETWORK_MESSAGE = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|fetch failed|Connection error|terminated|socket hang up|other side closed|premature close/i;
+const NETWORK_CODE = /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|UND_ERR_\w+)$/;
+
+/** Connection-level failures, including a stream cut off mid-response (undici: "terminated", cause UND_ERR_SOCKET). */
+function isNetworkFailure(err: Error): boolean {
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 4; e = e.cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (NETWORK_MESSAGE.test(e.message) || (typeof code === "string" && NETWORK_CODE.test(code))) return true;
+  }
+  return false;
 }
