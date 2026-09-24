@@ -42,13 +42,24 @@ export class ProviderRegistry {
    * yielded: once output has started, a failure is surfaced to the caller so a
    * half-streamed turn is never silently mixed with another model's output.
    */
-  async *chat(
+  chat(
     role: Role,
     req: Omit<ChatRequest, "model">,
     signal: AbortSignal,
     onFallback?: (e: FallbackEvent) => void,
   ): AsyncIterable<RoleChatEvent> {
-    const chain = this.chain(role);
+    return this.chatWith(role, this.chain(role), req, signal, onFallback);
+  }
+
+  /** Like chat, over an explicit chain (the critic reorders its chain to put the other model family first). */
+  async *chatWith(
+    role: Role,
+    chain: ModelRef[],
+    req: Omit<ChatRequest, "model">,
+    signal: AbortSignal,
+    onFallback?: (e: FallbackEvent) => void,
+  ): AsyncIterable<RoleChatEvent> {
+    chain = chain.filter((r) => this.providers.has(r.provider));
     if (chain.length === 0) throw new Error(`No usable model for role "${role}". Set an API key for one of its providers.`);
     let lastErr: unknown;
     for (const ref of chain) {
