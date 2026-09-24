@@ -30,6 +30,7 @@ class FakeSpeaker:
         self.said: list[str] = []
         self.hushed = 0
         self.playing = False
+        self.audible_until = float("-inf")  # nothing played yet
 
     def say_cached(self, phrase, on_first_audio=None):
         self.said.append(phrase)
@@ -37,8 +38,10 @@ class FakeSpeaker:
             on_first_audio(1.0)
         return True
 
-    def say(self, text, speech_id):
+    def say(self, text, speech_id, on_done=None):
         self.said.append(text)
+        if on_done:
+            on_done()
 
     def hush(self):
         self.hushed += 1
@@ -170,3 +173,86 @@ def test_say_never_speaks_its_own_name():
     e, sp, ev, _ = make(Script())
     e.command({"type": "say", "id": "1", "text": "Kira finished: the build passed."})
     assert sp.said == ["I finished: the build passed."]
+
+
+# ---- conversation --------------------------------------------------------------------
+
+
+def test_questions_get_mm_hm_and_tasks_get_on_it():
+    local = Script("Kira, are you listening to me?", "Kira, can you add a dark mode toggle")
+    e, sp, ev, _ = make(local)
+    e.handle(utt())
+    e.handle(utt())
+    assert sp.said == ["Mm-hm.", "On it."]
+    assert [x["text"] for x in ev if x["type"] == "utterance"] == ["are you listening to me?", "can you add a dark mode toggle"]
+
+
+def test_a_reply_that_expects_an_answer_opens_a_follow_up_without_the_wake_word():
+    local = Script("what can you do", "and what about tests")
+    e, sp, ev, clock = make(local)
+    e.command({"type": "say", "id": "s1", "text": "I build and fix code. What should we work on?", "listen": True})
+    clock.t = 3.0
+    e.handle(utt())
+    assert [x["text"] for x in ev if x["type"] == "utterance"] == ["what can you do"]
+    clock.t = 30.0  # the follow-up window has closed
+    e.handle(utt())
+    assert len([x for x in ev if x["type"] == "utterance"]) == 1
+
+
+def test_a_plain_announcement_does_not_open_a_follow_up():
+    e, sp, ev, clock = make(Script("so anyway about lunch"))
+    e.command({"type": "say", "id": "s1", "text": "Heads up: I lowered my autonomy."})
+    clock.t = 2.0
+    e.handle(utt())
+    assert ev == []
+
+
+def test_a_waiting_approval_takes_a_plain_yes_with_no_ack():
+    e, sp, ev, _ = make(Script("yes go ahead"))
+    e.command({"type": "state", "running": True, "awaiting": True})
+    e.handle(utt())
+    assert [x["text"] for x in ev if x["type"] == "utterance"] == ["yes go ahead"]
+    assert sp.said == []
+
+
+def test_kira_hearing_its_own_reply_in_the_follow_up_is_ignored():
+    local = Script("I build and fix code what should we work on", "what can you do")
+    e, sp, ev, clock = make(local)
+    e.command({"type": "say", "id": "s1", "text": "I build and fix code. What should we work on?", "listen": True})
+    clock.t = 3.0
+    e.handle(utt())  # its own words, heard late through the room
+    assert ev == [] and e.stats.ignored == 1
+    sp.audible_until = 5.0  # speech that began while Kira was still audible
+    e.handle(Utterance(audio=np.zeros(16000, dtype=np.float32), end_of_speech=5.5))
+    assert ev == [] and e.stats.ignored == 2
+
+
+def test_always_listen_needs_no_wake_word():
+    events: list[dict] = []
+    e = Engine(segmenter=SimpleNamespace(in_speech=False), local=Script("build a todo app"), cloud=None, speaker=FakeSpeaker(), emit=events.append, clock=Clock(), require_wake=False)  # type: ignore[arg-type]
+    e.handle(utt())
+    assert [x["text"] for x in events if x["type"] == "utterance"] == ["build a todo app"]
+
+
+def test_one_word_after_the_wake_word_is_a_command_not_a_bare_wake():
+    e, sp, ev, _ = make(Script("Kira, status."))
+    e.handle(utt())
+    assert [x["text"] for x in ev if x["type"] == "utterance"] == ["status."]
+    assert sp.said == ["Mm-hm."]
+
+
+def test_a_short_answer_is_not_mistaken_for_an_echo_of_the_question():
+    e, sp, ev, _ = make(Script("No."))
+    e.command({"type": "state", "running": True, "awaiting": True})
+    e.command({"type": "say", "id": "s1", "text": "I need your OK to install left-pad. Say yes or no.", "listen": True})
+    e.handle(utt())
+    assert [x["text"] for x in ev if x["type"] == "utterance"] == ["No."]
+
+
+def test_a_short_yes_or_no_to_an_approval_skips_the_cloud_transcript():
+    local, cloud = Script("No."), Script("know.")
+    e, sp, ev, _ = make(local, cloud)
+    e.command({"type": "state", "running": True, "awaiting": True})
+    e.handle(utt())
+    assert [(x["text"], x["source"]) for x in ev if x["type"] == "utterance"] == [("No.", "local")]
+    assert cloud.calls == 0

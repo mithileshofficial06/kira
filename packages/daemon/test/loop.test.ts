@@ -7,7 +7,7 @@ import { runAgent, type ChatFn, type RunOptions } from "../src/agent/loop.js";
 import { CheckpointManager } from "../src/checkpoint/manager.js";
 import type { ChatMessage } from "../src/providers/types.js";
 import { newToolCallId } from "../src/providers/tool-calls.js";
-import { BackgroundManager, Gate, PHASE0_TOOLS } from "../src/tools/index.js";
+import { BackgroundManager, EXECUTOR_TOOLS, Gate, PHASE0_TOOLS } from "../src/tools/index.js";
 
 interface ScriptedTurn {
   text?: string;
@@ -119,6 +119,23 @@ describe("runAgent", () => {
     const r = await runAgent(scripted([{ text: "I think it is done." }]), opts({ maxIdleTurns: 2 }));
     expect(r.status).toBe("stalled");
     expect(r.steps).toBe(3);
+  });
+
+  it("nudges, then stops as stalled when the model only ever rewrites its plan", async () => {
+    const plan = { name: "update_plan", args: { steps: [{ title: "Verify the agent responds", status: "active" }] } };
+    const chat = scripted([{ text: "Let's confirm I am responsive.", calls: [plan] }]);
+    const r = await runAgent(chat, opts({ tools: EXECUTOR_TOOLS }));
+    expect(r.status).toBe("stalled");
+    expect(r.steps).toBe(6);
+    expect(r.summary).toMatch(/Only updated the plan/);
+    expect(chat.seen[3]!.some((m) => m.role === "user" && /only updated the plan/i.test(String(m.content)))).toBe(true);
+  });
+
+  it("does not count plan updates alongside real work as stalling", async () => {
+    const plan = { name: "update_plan", args: { steps: [{ title: "list", status: "active" }] } };
+    const chat = scripted([{ calls: [plan, { name: "list_dir", args: {} }] }]);
+    const r = await runAgent(chat, opts({ tools: EXECUTOR_TOOLS, maxSteps: 8 }));
+    expect(r.status).toBe("budget");
   });
 
   it("stops at the step budget", async () => {

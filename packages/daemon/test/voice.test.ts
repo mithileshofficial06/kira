@@ -12,6 +12,7 @@ import type { ChatFn } from "../src/agent/loop.js";
 import { emptyDeck, reduceDeck } from "../src/daemon/deck.js";
 import { KiraDaemon } from "../src/daemon/server.js";
 import { newToolCallId } from "../src/providers/tool-calls.js";
+import { FALLBACK_REPLY, parse } from "../src/voice/converse.js";
 import { classify } from "../src/voice/intents.js";
 import { narrate, statusLine } from "../src/voice/narrator.js";
 
@@ -31,11 +32,35 @@ describe("classify", () => {
     const asking = { running: true, pendingApproval: true };
     expect(classify("yes, go ahead", asking)).toEqual({ kind: "approve", allow: true });
     expect(classify("No, write it by hand.", asking)).toEqual({ kind: "approve", allow: false, note: "write it by hand." });
-    expect(classify("yes", { running: true, pendingApproval: false })).toEqual({ kind: "busy", text: "yes" });
+    expect(classify("yes", { running: true, pendingApproval: false })).toEqual({ kind: "chat", text: "yes" });
+  });
+
+  it("takes a sound-alike of a lone yes or no as the answer, but only while an approval waits", () => {
+    const asking = { running: true, pendingApproval: true };
+    expect(classify("know.", asking)).toEqual({ kind: "approve", allow: false });
+    expect(classify("Yea", asking)).toEqual({ kind: "approve", allow: true });
+    expect(classify("know.", { running: true, pendingApproval: false }).kind).toBe("chat");
   });
 
   it("does not start a second task over a running one", () => {
     expect(classify("add dark mode", { running: true, pendingApproval: false }).kind).toBe("busy");
+  });
+
+  it("sends questions and remarks to conversation, not to a coding run", () => {
+    for (const t of ["are you listening to me?", "what can you do", "I need a login page", "hello", "testing one two three"]) {
+      expect(classify(t, idle), t).toEqual({ kind: "chat", text: t });
+    }
+    for (const t of ["can you please add tests for the parser", "Please fix the build", "let's refactor the router", "I want you to write a README"]) {
+      expect(classify(t, idle).kind, t).toBe("task");
+    }
+  });
+});
+
+describe("conversation replies", () => {
+  it("turns a TASK: line into a goal and strips markdown from spoken answers", () => {
+    expect(parse("TASK: Build a login page with email and password.")).toEqual({ task: "Build a login page with email and password" });
+    expect(parse("**Yes**, I'm listening.\nWhat should we build?")).toEqual({ reply: "Yes, I'm listening. What should we build?" });
+    expect(parse("")).toEqual({ reply: FALLBACK_REPLY });
   });
 });
 
@@ -48,6 +73,13 @@ describe("narrate", () => {
     expect(narrate({ type: "state", state: "RATE_LIMITED", resumeAt: 60_000 }, d, 0)).toMatch(/Pausing for about 60 seconds/);
     expect(narrate({ type: "state", state: "RATE_LIMITED", resumeAt: 5_000 }, d, 0)).toBeUndefined();
     expect(narrate({ type: "state", state: "EXECUTING" }, d)).toBeUndefined();
+  });
+
+  it("reads a step-mode approval as a short question", () => {
+    const summary = "Step 9 finished: The directory 'app' was created. I will now install the packages.. Continue?";
+    expect(narrate({ type: "approval", id: "a", request: { tool: "step", summary, category: "step" } }, emptyDeck())).toBe(
+      "Step 9 is done. The directory 'app' was created. Shall I continue? Say yes or no.",
+    );
   });
 
   it("gives a status line from the Flight Deck state", () => {
@@ -81,7 +113,19 @@ function scripted(turns: { calls: { name: string; args: unknown }[] }[]): ChatFn
   };
 }
 
-async function withVoice(executor: ChatFn, hear: unknown[]) {
+/** A utility model that answers each conversation turn with the next line. */
+function talker(lines: string[]): ChatFn & { asked: string[] } {
+  const asked: string[] = [];
+  let i = 0;
+  const fn = async function* (req: { messages: { role: string; content: unknown }[] }) {
+    asked.push(String(req.messages.at(-1)!.content));
+    yield { type: "text" as const, delta: lines[Math.min(i++, lines.length - 1)]! };
+    yield { type: "done" as const, finishReason: "stop" };
+  };
+  return Object.assign(fn, { asked }) as ChatFn & { asked: string[] };
+}
+
+async function withVoice(executor: ChatFn, hear: unknown[], utility?: ChatFn) {
   const logFile = join(ws, "..", `${ws.split(/[\\/]/).pop()}-said.log`);
   process.env.KIRA_FAKE_HEAR = JSON.stringify(hear);
   process.env.KIRA_FAKE_LOG = logFile;
@@ -90,7 +134,7 @@ async function withVoice(executor: ChatFn, hear: unknown[]) {
     pipe: "",
     token: "",
     initGit: true,
-    chatFor: () => executor,
+    chatFor: (role) => (role === "utility" && utility ? utility : executor),
     defaults: { plan: false, verify: false },
     voice: { mistralApiKey: "test", command: { file: process.execPath, args: [FAKE] } },
   });
@@ -149,5 +193,42 @@ describe("voice end to end (fake sidecar, real daemon)", () => {
     expect(daemon!.deckState().report?.status).toBe("aborted");
     await until(() => said().some((c) => c.text?.startsWith("Stopped.")));
     expect(said().find((c) => c.text?.startsWith("Stopped."))?.text).toMatch(/Stopped\. (I rolled back step \d+, and n|N)othing is left running\./);
+  }, 60_000);
+});
+
+describe("voice conversation (fake sidecar, real daemon)", () => {
+  it("answers a question out loud without starting a run, and keeps listening for the answer", async () => {
+    const utility = talker(["Yes, I'm listening. What should we build?"]);
+    const { said } = await withVoice(scripted([]), [
+      { after: 50, event: { type: "utterance", text: "are you listening to me?", heard: "Kira are you listening to me", source: "voxtral", endOfSpeechAt: 0 } },
+    ], utility);
+    await until(() => said().some((c) => c.type === "say"));
+    const reply = said().find((c) => c.type === "say") as { text: string; listen?: boolean };
+    expect(reply).toMatchObject({ text: "Yes, I'm listening. What should we build?", listen: true });
+    expect(utility.asked).toEqual(["are you listening to me?"]);
+    expect(daemon!.deckState().run).toBeUndefined(); // no coding run for a question
+  }, 30_000);
+
+  it("turns work asked for in other words into a run, and an approval keeps the mic open for yes or no", async () => {
+    const utility = talker(["TASK: Create greet.js that exports a greeting function"]);
+    const executor = scripted([
+      { calls: [{ name: "write_file", args: { path: "greet.js", content: "module.exports = () => 'hi';\n" } }] },
+      { calls: [{ name: "run_command", args: { command: "npm install left-pad" } }] },
+      { calls: [{ name: "finish", args: { outcome: "done", summary: "Greeting module written." } }] },
+    ]);
+    const { said } = await withVoice(executor, [
+      { after: 50, event: { type: "utterance", text: "I need a greeting module", heard: "Kira I need a greeting module", source: "voxtral", endOfSpeechAt: 0 } },
+      { whenSaid: "I need your OK", after: 50, event: { type: "utterance", text: "no", heard: "no", source: "voxtral", endOfSpeechAt: 0 } },
+    ], utility);
+    await until(() => !!daemon!.deckState().report);
+    expect(daemon!.deckState().run?.goal).toBe("Create greet.js that exports a greeting function");
+    await until(() => said().some((c) => c.text?.startsWith("Done.")));
+    const says = said().filter((c) => c.type === "say") as { text: string; listen?: boolean }[];
+    expect(says[0]!.text).toBe("On it: Create greet.js that exports a greeting function.");
+    expect(says.find((s) => s.text.startsWith("I need your OK"))?.listen).toBe(true);
+    expect(says.find((s) => s.text.startsWith("Done."))?.listen).toBe(true);
+    const awaiting = said().filter((c) => c.type === "state").map((c) => (c as { awaiting?: boolean }).awaiting);
+    expect(awaiting).toContain(true);
+    expect(awaiting.at(-1)).toBe(false);
   }, 60_000);
 });

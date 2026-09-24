@@ -22,7 +22,7 @@ from typing import Callable, Iterator
 import numpy as np
 
 MISTRAL_API = "https://api.mistral.ai/v1"
-CACHED_PHRASES = ("On it.", "Yes?", "Stopping.", "Sorry, I didn't catch that.")
+CACHED_PHRASES = ("On it.", "Mm-hm.", "Yes?", "Stopping.", "Sorry, I didn't catch that.")
 
 
 def cache_dir() -> str:
@@ -114,6 +114,8 @@ class Player:
         self._lock = threading.Lock()
         self._first_audio_cb: Callable[[float], None] | None = None
         self.playing_until = 0.0
+        #: When the last audio (plus the device tail) stops being audible; unlike playing_until, hush() keeps it.
+        self.audible_until = 0.0
         self.stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32", device=device, callback=self._callback, blocksize=0, latency="low")
         self.stream.start()
 
@@ -141,6 +143,7 @@ class Player:
             self._first_audio_cb = on_first_audio
         self._q.put(audio.astype(np.float32))
         self.playing_until = max(self.playing_until, time.monotonic()) + len(audio) / self.sample_rate
+        self.audible_until = self.playing_until + 0.35
 
     def hush(self) -> None:
         with self._lock:
@@ -148,6 +151,7 @@ class Player:
                 self._q.get_nowait()
             self._cur = np.zeros(0, dtype=np.float32)
         self.playing_until = 0.0
+        self.audible_until = min(self.audible_until, time.monotonic() + 0.35)
 
     @property
     def playing(self) -> bool:

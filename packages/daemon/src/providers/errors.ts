@@ -59,7 +59,7 @@ export function classifyProviderError(provider: string, err: unknown): unknown {
 
 const OVERLOADED = /overloaded|out of capacity|not enough capacity|temporarily unavailable|service unavailable|try again later|server (is )?busy/i;
 
-const NETWORK_MESSAGE = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|fetch failed|Connection error|terminated|socket hang up|other side closed|premature close/i;
+const NETWORK_MESSAGE = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|fetch failed|Connection error|Request timed out|terminated|socket hang up|other side closed|premature close/i;
 const NETWORK_CODE = /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|UND_ERR_\w+)$/;
 
 /** Connection-level failures, including a stream cut off mid-response (undici: "terminated", cause UND_ERR_SOCKET). */

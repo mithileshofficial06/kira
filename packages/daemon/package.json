@@ -12,7 +12,8 @@
     "spike": "tsx src/scripts/spike.ts",
     "recall-probe": "tsx src/scripts/recall-probe.ts",
     "daemon": "tsx src/daemon/main.ts",
-    "kira": "tsx src/scripts/kira.ts"
+    "kira": "tsx src/scripts/kira.ts",
+    "voice-e2e": "tsx src/scripts/voice-e2e.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.3",

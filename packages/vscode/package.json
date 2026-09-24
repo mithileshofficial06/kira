@@ -48,6 +48,18 @@
         "category": "Kira"
       },
       {
+        "command": "kira.startVoice",
+        "title": "Start Voice",
+        "category": "Kira",
+        "icon": "$(mic)"
+      },
+      {
+        "command": "kira.stopVoice",
+        "title": "Stop Voice",
+        "category": "Kira",
+        "icon": "$(mic-filled)"
+      },
+      {
         "command": "kira.restartDaemon",
         "title": "Restart Daemon",
         "category": "Kira"

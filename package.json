@@ -17,7 +17,8 @@
     "check-models": "npm run check-models -w @kira/daemon",
     "spike": "npm run spike -w @kira/daemon --",
     "recall-probe": "npm run recall-probe -w @kira/daemon --",
-    "kira": "npm run kira -w @kira/daemon --"
+    "kira": "npm run kira -w @kira/daemon --",
+    "voice-e2e": "npm run voice-e2e -w @kira/daemon"
   },
   "allowScripts": {
     "node-pty@1.1.0": true,

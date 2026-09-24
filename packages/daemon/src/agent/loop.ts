@@ -127,6 +127,10 @@ class StepTimeoutError extends Error {
  * truncates cleanly at the last turn boundary, and a provider failure mid-turn
  * throws away only the uncommitted turn (spec §8 invariant 6).
  */
+const PLAN_ONLY_TOOL = "update_plan";
+const PLAN_ONLY_NUDGE = 3;
+const PLAN_ONLY_LIMIT = 6;
+
 export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResult> {
   const budget = opts.budget ?? new Budget({ maxSteps: opts.maxSteps ?? 40 });
   const maxSteps = opts.maxSteps ?? budget.limits.maxSteps;
@@ -148,6 +152,8 @@ export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResul
   const models: ModelRef[] = [];
   let malformedCalls = 0;
   let idleTurns = 0;
+  /** Consecutive turns that only rewrote the plan: talking about work instead of doing it. */
+  let planOnlyTurns = 0;
   let providerWaitedMs = 0;
   let budgetTriggerFired = false;
 
@@ -362,8 +368,20 @@ export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResul
         if (n >= maxRepeated) stuck = r.result.content;
       }
     }
+    planOnlyTurns = !finished && calls.every((c) => c.name === PLAN_ONLY_TOOL) ? planOnlyTurns + 1 : 0;
+    if (planOnlyTurns === PLAN_ONLY_NUDGE) {
+      turn.push({
+        role: "user",
+        content:
+          "You have only updated the plan for several turns without doing any work. Use the tools to make progress now. " +
+          "If the goal needs no code changes, or you cannot do it, call finish with outcome blocked and say why.",
+      });
+    }
     commit(turn); // turn boundary
     clock.stop();
+    if (planOnlyTurns >= PLAN_ONLY_LIMIT) {
+      return result("stalled", `Only updated the plan for ${planOnlyTurns} turns in a row without doing any work.`, step);
+    }
 
     if (malformedThisStep > 2) autonomy.downgrade(`${malformedThisStep} malformed tool calls in step ${step}`);
     const snap = budget.snapshot();

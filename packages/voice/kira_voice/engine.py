@@ -9,6 +9,11 @@ Rules:
 - While a run is going, "stop" (with or without the wake word) cancels it at once.
 - While Kira is speaking, only a wake-prefixed utterance counts (barge-in),
   so its own voice cannot trigger it; spoken text never contains its name.
+- A conversation: after a reply that expects an answer (the daemon marks it
+  "listen"), and all the while an approval is waiting, the next sentence needs
+  no wake word. Speech that began while Kira was still audible, or that repeats
+  what Kira just said, is its own echo and is ignored.
+- With require_wake=False ("always listen") every sentence counts.
 """
 from __future__ import annotations
 
@@ -22,12 +27,18 @@ import numpy as np
 
 from . import protocol
 from .vad import Segmenter, Utterance
-from .wake import is_stop, speakable, split_wake, word_count
+from .wake import is_stop, is_yes_no, looks_like_task, similar, speakable, split_wake, word_count
 
 LISTEN_WINDOW_S = 8.0
+#: After a reply that expects an answer, how long the next sentence needs no wake word.
+FOLLOW_UP_S = 10.0
+#: Slack for the VAD's pre-roll when deciding whether speech began while Kira was audible.
+ECHO_SLACK_S = 0.25
 #: People pause after "Kira," before the task. Wait this long before answering "Yes?",
 #: so "Kira, ... build the login page" gets one acknowledgement, not a "Yes?" mid-sentence.
 YES_GRACE_S = 0.7
+#: After a sentence ends, how long to wait for more of it before acting on it.
+CONTINUE_GRACE_S = 1.2
 
 
 class Transcriber(Protocol):
@@ -38,10 +49,12 @@ class Speaker(Protocol):
     """What the engine needs from TTS + playback."""
 
     def say_cached(self, phrase: str, on_first_audio: Callable[[float], None] | None = None) -> bool: ...
-    def say(self, text: str, speech_id: str) -> None: ...
+    def say(self, text: str, speech_id: str, on_done: Callable[[], None] | None = None) -> None: ...
     def hush(self) -> None: ...
     @property
     def playing(self) -> bool: ...
+    @property
+    def audible_until(self) -> float: ...
 
 
 @dataclass
@@ -61,10 +74,14 @@ class Engine:
         speaker: Speaker,
         emit: Callable[[dict[str, Any]], None] = protocol.emit,
         clock: Callable[[], float] = time.monotonic,
+        require_wake: bool = True,
     ) -> None:
         self.segmenter, self.local, self.cloud, self.speaker, self.emit, self.clock = segmenter, local, cloud, speaker, emit, clock
+        self.require_wake = require_wake
         self.running = False  # a Kira run is in progress (set by the daemon)
+        self.awaiting = False  # an approval is waiting for "yes" or "no" (set by the daemon)
         self.listening_until = 0.0
+        self.last_said = ""
         self._utterance_seq = 0
         self._stt_ms = 0.0
         self.stats = EngineStats()
@@ -76,11 +93,18 @@ class Engine:
     def command(self, cmd: dict[str, Any]) -> None:
         t = cmd.get("type")
         if t == "say":
-            self.speaker.say(speakable(str(cmd.get("text", ""))), str(cmd.get("id", "")))
+            text = speakable(str(cmd.get("text", "")))
+            self.last_said = text
+            on_done = self._follow_up if cmd.get("listen") else None
+            self.speaker.say(text, str(cmd.get("id", "")), on_done)
         elif t == "hush":
             self.speaker.hush()
         elif t == "state":
             self.running = bool(cmd.get("running"))
+            self.awaiting = bool(cmd.get("awaiting"))
+
+    def _follow_up(self) -> None:
+        self.listening_until = self.clock() + FOLLOW_UP_S
 
     # ---- audio -------------------------------------------------------------------
     def feed(self, frame: np.ndarray) -> None:
@@ -121,6 +145,33 @@ class Engine:
         t.daemon = True
         t.start()
 
+    def _own_ack(self, u: Utterance) -> bool:
+        """Speech that overlapped Kira's audio and sounds like its acknowledgement is its echo."""
+        if u.end_of_speech - u.duration_s + ECHO_SLACK_S >= self.speaker.audible_until:
+            return False
+        return similar(self.local.transcribe(u.audio), "On it. Mm-hm. Yes?") >= 0.5
+
+    def _continuation(self, u: Utterance) -> tuple[np.ndarray, bool]:
+        """People pause mid-sentence ("create hello.txt ... that says hi"). Wait briefly after the end of
+        speech; if they keep talking, join the pieces so the task arrives whole. Timed on the real
+        monotonic clock, like the VAD's end_of_speech."""
+        audio, more, end = u.audio, False, u.end_of_speech
+        gap = np.zeros(int(0.2 * 16000), dtype=np.float32)
+        while True:
+            try:
+                nxt = self._work.get_nowait()
+            except queue.Empty:
+                nxt = None
+            if nxt is None and (self.segmenter.in_speech or time.monotonic() < end + CONTINUE_GRACE_S):
+                time.sleep(0.05)
+                continue
+            if nxt is None:
+                return audio, more
+            if nxt.duration_s >= 0.25 and not self._own_ack(nxt):  # a real continuation, not a click or our "On it."
+                audio, more, end = np.concatenate([audio, gap, nxt.audio]), True, nxt.end_of_speech
+            if self._work.empty() and not self.segmenter.in_speech and time.monotonic() >= end + CONTINUE_GRACE_S:
+                return audio, more
+
     # ---- one utterance -----------------------------------------------------------
     def handle(self, u: Utterance) -> None:
         if u.duration_s < 0.25:
@@ -141,26 +192,43 @@ class Engine:
             self.speaker.say_cached("Stopping.", self._latency("stop", u.end_of_speech))
             return
 
-        listening = self.clock() < self.listening_until
-        if not woke and (speaking or not listening):
-            self.stats.ignored += 1
-            return  # not addressed to Kira: it goes nowhere
+        if not woke:
+            listening = self.clock() < self.listening_until or self.awaiting or not self.require_wake
+            if speaking or not listening:
+                self.stats.ignored += 1
+                return  # not addressed to Kira: it goes nowhere
+            # Without the wake word, make sure this is not Kira hearing itself.
+            began = u.end_of_speech - u.duration_s
+            if began + ECHO_SLACK_S < self.speaker.audible_until or (self.last_said and word_count(heard) >= 3 and similar(heard, self.last_said) >= 0.6):
+                self.stats.ignored += 1
+                return
 
         if woke:
             self.stats.wakes += 1
             self.speaker.hush()  # barge-in
             self.emit({"type": "wake", "at": eos_epoch})
-            if word_count(rest) < 2:
+            if word_count(rest) == 0:  # "Kira, status" is a command; a bare "Kira" waits for one
                 self.listening_until = self.clock() + LISTEN_WINDOW_S
                 self._yes_after_grace(self._utterance_seq, u.end_of_speech)
                 return
 
         self.listening_until = 0.0
-        self.speaker.say_cached("On it.", self._latency("ack", u.end_of_speech))
-        text, source = rest if woke else heard, "local"
-        if self.cloud is not None:
+        said = rest if woke else heard
+        # Work gets "On it."; a question or a remark gets "Mm-hm." while the daemon thinks of an answer.
+        # A yes/no to a waiting approval needs no ack: the daemon answers it at once.
+        if not (self.awaiting and is_yes_no(said)):
+            self.speaker.say_cached("On it." if looks_like_task(said) else "Mm-hm.", self._latency("ack", u.end_of_speech))
+        audio, more = self._continuation(u)
+        if more:
+            heard = self.local.transcribe(audio)
+            woke2, rest2 = split_wake(heard)
+            said = rest2 if woke2 else heard
+        text, source = said, "local"
+        # A lone "no" to a waiting approval: the cloud model tends to write a sound-alike ("know"). Trust the local one.
+        short_answer = self.awaiting and is_yes_no(said) and word_count(said) <= 3
+        if self.cloud is not None and not short_answer:
             try:
-                accurate = self.cloud.transcribe(u.audio)
+                accurate = self.cloud.transcribe(audio)
                 a_woke, a_rest = split_wake(accurate)
                 text, source = (a_rest if a_woke else accurate) or text, "voxtral"
             except Exception as e:

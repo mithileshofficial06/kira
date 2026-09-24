@@ -11,6 +11,11 @@ const LEVELS = ["observe", "propose", "step", "run", "trust"];
 export function narrate(e: KiraEvent, deck: DeckState, now = Date.now()): string | undefined {
   switch (e.type) {
     case "approval":
+      if (e.request.category === "step") {
+        // "Step 9 finished: <what the model said>. Continue?" read aloud is a mouthful: keep the gist.
+        const m = e.request.summary.match(/^Step (\d+) finished: ([\s\S]*?)\.? Continue\?$/);
+        return `Step ${m?.[1] ?? ""} is done. ${firstSentence(m?.[2] ?? "")} Shall I continue? Say yes or no.`.replace(/\s+/g, " ");
+      }
       return `I need your OK to ${e.request.category.replace(/-/g, " ")}: ${speakCommand(e.request.summary)}. Say yes or no.`;
     case "autonomy":
       return `Heads up: I've lowered my autonomy to ${LEVELS[e.level] ?? e.level}, because ${firstClause(e.reason ?? "something went wrong")}.`;

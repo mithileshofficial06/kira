@@ -60,6 +60,7 @@ class RecordingSpeaker:
     def __init__(self) -> None:
         self.said: list[str] = []
         self.playing = False
+        self.audible_until = float("-inf")  # nothing played yet
 
     def say_cached(self, phrase, on_first_audio=None):
         self.said.append(phrase)
@@ -67,8 +68,10 @@ class RecordingSpeaker:
             on_first_audio(time.monotonic())
         return True
 
-    def say(self, text, speech_id):
+    def say(self, text, speech_id, on_done=None):
         self.said.append(text)
+        if on_done:
+            on_done()
 
     def hush(self):
         pass
@@ -118,8 +121,8 @@ def test_wake_and_command_with_latency_under_two_seconds(whisper):
     heard = [u["text"] for u in utterances]
     print(f"\nheard: {heard}\nack latency ms: {lat} p50={statistics.median(lat):.0f}; local STT ms: {[e['sttMs'] for e in acks]}")
     assert len(utterances) == len(COMMANDS), heard
-    # One acknowledgement per command: no "Yes?" in the middle of a sentence.
-    assert speaker.said == ["On it."] * len(COMMANDS), speaker.said
+    # One acknowledgement per command, no "Yes?" in the middle of a sentence: work gets "On it.", questions "Mm-hm.".
+    assert speaker.said == ["On it.", "On it.", "On it.", "Mm-hm.", "On it.", "Mm-hm."], speaker.said
     assert "login" in heard[0].lower() and "billing" in heard[1].lower() and "dark mode" in heard[2].lower()
     assert all(u["source"] == "voxtral" for u in utterances)
     # Spec §10 Phase 5: p50 end of speech -> first audible word <= 2.0 s.
@@ -163,3 +166,44 @@ def test_kira_does_not_trigger_on_its_own_voice(whisper):
     fired = [e for e in events if e["type"] in ("wake", "utterance", "stop")]
     print(f"\nnarration clips: {len(NARRATION)}, triggers: {fired}, ignored: {engine.stats.ignored}")
     assert fired == []
+
+
+def test_a_conversation_needs_the_wake_word_only_once(whisper):
+    """"Kira, are you listening?" -> Kira answers and keeps listening -> a follow-up without "Kira" is heard,
+    while Kira's own answer echoing back through the room is not."""
+    reply = "Yes, I'm listening. What should we build today?"
+    # Synthesize first: generating a new clip mid-test takes longer than the follow-up window.
+    ask, echo, follow = clip("Kira, are you listening to me?"), clip(reply, voice=KIRA_VOICE), clip("What kinds of projects can you build?")
+    engine, speaker, events = make(whisper)
+    run(engine, ask)
+    engine.command({"type": "say", "id": "s1", "text": reply, "listen": True})  # the fake speaker finishes at once
+    run(engine, echo, realtime=False)  # its own voice, late, through the room
+    run(engine, follow)
+    engine.close()
+    heard = [e["text"] for e in events if e["type"] == "utterance"]
+    print(f"\nheard: {heard}; said: {speaker.said}; ignored: {engine.stats.ignored}")
+    assert len(heard) == 2 and "listening" in heard[0].lower() and "projects" in heard[1].lower(), heard
+    assert speaker.said[0] == "Mm-hm." and speaker.said[-1] == "Mm-hm."
+    assert engine.stats.ignored == 1
+
+
+def test_an_approval_takes_a_plain_spoken_yes(whisper):
+    engine, speaker, events = make(whisper)
+    engine.command({"type": "state", "running": True, "awaiting": True})
+    run(engine, clip("Yes, go ahead."))
+    engine.close()
+    heard = [e["text"].lower() for e in events if e["type"] == "utterance"]
+    print(f"\nheard: {heard}; said: {speaker.said}")
+    assert len(heard) == 1 and heard[0].startswith("yes")
+    assert speaker.said == []  # no ack: the daemon answers it
+
+
+def test_a_pause_in_the_middle_of_a_sentence_does_not_cut_the_task(whisper):
+    first, second = clip("Kira, create a file named notes.txt"), clip("that contains the word banana.")
+    engine, speaker, events = make(whisper)
+    run(engine, np.concatenate([first, np.zeros(int(SAMPLE_RATE * 0.6), np.float32), second]))
+    engine.close()
+    heard = [e["text"] for e in events if e["type"] == "utterance"]
+    print(f"\nheard: {heard}; said: {speaker.said}")
+    assert len(heard) == 1 and "notes" in heard[0].lower() and "banana" in heard[0].lower(), heard
+    assert speaker.said == ["On it."]

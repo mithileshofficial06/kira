@@ -73,6 +73,8 @@ describe("classifyProviderError", () => {
   it("treats capacity errors sent mid-stream (no status) as a provider outage, not a crash", () => {
     // Seen live from NIM: an error event inside the SSE stream, no HTTP status.
     expect(classifyProviderError("nim", new Error("Service temporarily overloaded"))).toBeInstanceOf(ProviderUnavailableError);
+    // The OpenAI SDK's client-side timeout (APIConnectionTimeoutError): wait or fall back, don't fail the run.
+    expect(classifyProviderError("mistral", new Error("Request timed out."))).toBeInstanceOf(ProviderUnavailableError);
     expect(classifyProviderError("mistral", new Error("Not enough capacity available for this request, please retry later."))).toBeInstanceOf(
       ProviderUnavailableError,
     );

@@ -56,7 +56,7 @@ export interface DaemonOptions {
   defaults?: { autonomy?: AutonomyLevel; plan?: boolean; verify?: boolean; maxSteps?: number; maxCostUsd?: number };
   log?: (line: string) => void;
   /** Enables voice/start: the sidecar's settings (the Mistral key for Voxtral, python path). */
-  voice?: Omit<VoiceOptions, "log" | "onVoiceEvent">;
+  voice?: Omit<VoiceOptions, "log">;
 }
 
 /** A pipe name unique to this workspace and daemon instance. */
@@ -309,6 +309,8 @@ export class KiraDaemon {
       approve: (id, allow, note) => this.approveRequest(id, allow, note),
       leftOff: () => this.leftOffText(),
       onEvent: (fn) => this.onEvent(fn),
+      chat: this.opts.chatFor("utility"),
+      workspace: this.opts.workspace,
     };
     this.voice = new VoiceBridge(host, { ...this.opts.voice, log: this.opts.log });
     this.voiceError = undefined;
@@ -320,6 +322,11 @@ export class KiraDaemon {
       throw new ResponseError(-32005, `voice failed to start: ${this.voiceError}`);
     }
     return this.voiceStatus();
+  }
+
+  /** Tests: a sidecar started with --source inject hears `text` as speech. */
+  voiceHear(text: string): void {
+    this.voice?.hear(text);
   }
 
   async voiceStop(): Promise<VoiceStatus> {

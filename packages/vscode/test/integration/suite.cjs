@@ -17,7 +17,7 @@ exports.run = async function run() {
 
   // Commands are registered.
   const commands = await vscode.commands.getCommands(true);
-  for (const c of ["kira.start", "kira.stop", "kira.flightDeck", "kira.leftOff", "kira.remember", "kira.restartDaemon"]) {
+  for (const c of ["kira.start", "kira.stop", "kira.flightDeck", "kira.leftOff", "kira.remember", "kira.startVoice", "kira.stopVoice", "kira.restartDaemon"]) {
     assert.ok(commands.includes(c), `${c} is registered`);
   }
 
@@ -36,12 +36,18 @@ exports.run = async function run() {
   assert.equal(deck.run.goal, "Call finish with outcome done and summary 'integration check'.");
   assert.equal(deck.run.workspace.toLowerCase(), process.env.KIRA_TEST_WORKSPACE.toLowerCase());
   assert.equal(deck.run.state, "IDLE");
-  if (deck.report.status !== "done") {
-    assert.equal(deck.report.status, "failed");
-    assert.match(deck.report.summary, /No usable model|API key/);
-  }
+  // This checks plumbing, not the model: with keys a real model may end "stuck" or "stalled" on a scratch
+  // workspace. Whatever the outcome, the panel must get a report that says what happened.
+  assert.ok(deck.report.summary.trim(), `report ${deck.report.status} has a summary`);
 
   // Memory answers through the daemon.
   await vscode.commands.executeCommand("kira.leftOff");
+  // Voice starts through the daemon when a Mistral key is configured; without one it must fail cleanly.
+  await vscode.commands.executeCommand("kira.startVoice");
+  console.log(`[kira integration] voice listening: ${api.voiceListening()}`);
+  if (api.voiceListening()) {
+    await vscode.commands.executeCommand("kira.stopVoice");
+    assert.equal(api.voiceListening(), false);
+  }
   console.log(`[kira integration] report: ${deck.report.status} — ${deck.report.summary.split("\n")[0]}`);
 };

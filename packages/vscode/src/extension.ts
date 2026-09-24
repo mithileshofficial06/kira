@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import type { KiraEvent } from "../../daemon/src/control/events.js";
 import { pendingApprovals } from "../../daemon/src/daemon/deck.js";
-import { Methods, type MemoryItemView, type StartResult } from "../../daemon/src/daemon/protocol.js";
+import { Methods, type MemoryItemView, type StartResult, type VoiceStatus } from "../../daemon/src/daemon/protocol.js";
 import { DaemonClient } from "./daemon-client.js";
 import { FlightDeckPanel, type FromWebview } from "./panel.js";
 
@@ -9,6 +9,9 @@ let client: DaemonClient | undefined;
 let starting: Promise<DaemonClient> | undefined;
 let output: vscode.OutputChannel;
 let status: vscode.StatusBarItem;
+let mic: vscode.StatusBarItem;
+/** Polls voice/status while listening, so a sidecar that dies does not leave a stale mic. */
+let voicePoll: ReturnType<typeof setInterval> | undefined;
 let context: vscode.ExtensionContext;
 /** Approvals already shown as a notification, so each is asked once. */
 const notified = new Set<string>();
@@ -18,6 +21,7 @@ export interface KiraApi {
   deck(): DaemonClient["deck"] | undefined;
   daemonConnected(): boolean;
   panelOpen(): boolean;
+  voiceListening(): boolean;
 }
 
 export function activate(ctx: vscode.ExtensionContext): KiraApi {
@@ -27,23 +31,29 @@ export function activate(ctx: vscode.ExtensionContext): KiraApi {
   status.command = "kira.flightDeck";
   setStatus("idle");
   status.show();
+  mic = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+  mic.command = "kira.stopVoice";
 
   ctx.subscriptions.push(
     output,
     status,
+    mic,
     vscode.commands.registerCommand("kira.start", startRun),
     vscode.commands.registerCommand("kira.stop", stopRun),
     vscode.commands.registerCommand("kira.flightDeck", () => void openDeck()),
     vscode.commands.registerCommand("kira.leftOff", leftOff),
     vscode.commands.registerCommand("kira.remember", remember),
+    vscode.commands.registerCommand("kira.startVoice", startVoice),
+    vscode.commands.registerCommand("kira.stopVoice", stopVoice),
     vscode.commands.registerCommand("kira.restartDaemon", async () => {
       client?.dispose();
       client = undefined;
       await ensureClient();
     }),
     { dispose: () => client?.dispose() },
+    { dispose: () => setMic(undefined) },
   );
-  return { deck: () => client?.deck, daemonConnected: () => !!client, panelOpen: () => !!FlightDeckPanel.current };
+  return { deck: () => client?.deck, daemonConnected: () => !!client, panelOpen: () => !!FlightDeckPanel.current, voiceListening: () => !!voicePoll };
 }
 
 export function deactivate(): void {
@@ -65,6 +75,7 @@ async function ensureClient(): Promise<DaemonClient> {
       c.onEvent(onEvent);
       c.onExit(() => {
         client = undefined;
+        setMic(undefined);
         setStatus("idle");
         FlightDeckPanel.current?.post({ type: "connection", status: "stopped", message: "The daemon exited. Kira: Restart Daemon to reconnect." });
         void vscode.window.showWarningMessage("The Kira daemon stopped.", "Restart").then((a) => {
@@ -121,8 +132,10 @@ async function leftOff(): Promise<void> {
   const r = await withClient((c) => c.request<{ text: string }>(Methods.leftOff));
   if (!r) return;
   output.appendLine(`[kira] where we left off:\n${r.text}`);
-  const choice = await vscode.window.showInformationMessage(r.text, { modal: false }, "Open Flight Deck");
-  if (choice) await openDeck();
+  // Not awaited: a notification with a button settles only when dismissed, and the command should return now.
+  void vscode.window.showInformationMessage(r.text, { modal: false }, "Open Flight Deck").then((a) => {
+    if (a) void openDeck();
+  });
 }
 
 async function remember(): Promise<void> {
@@ -138,6 +151,45 @@ async function remember(): Promise<void> {
   if (!text?.trim()) return;
   const r = await withClient((c) => c.request<{ id: number }>(Methods.remember, { kind: kind.value, text }));
   if (r) void vscode.window.showInformationMessage(`Kira will remember that.`);
+}
+
+async function startVoice(): Promise<void> {
+  const r = await withClient((c) => c.request<VoiceStatus>(Methods.voiceStart));
+  if (!r) return;
+  setMic(r);
+  output.appendLine(`[kira] voice listening: in ${r.input ?? "?"}, out ${r.output ?? "?"}, wake ${r.wake ?? "?"}`);
+  void vscode.window.showInformationMessage(`Kira is listening. Say "${r.wake ?? "Kira"}, …", or "stop" to interrupt.`);
+}
+
+async function stopVoice(): Promise<void> {
+  if (!client) return setMic(undefined);
+  const r = await withClient((c) => c.request<VoiceStatus>(Methods.voiceStop));
+  setMic(r);
+}
+
+/** Shows the mic while voice runs; undefined or not running hides it and stops polling. */
+function setMic(v: VoiceStatus | undefined): void {
+  if (!v?.running) {
+    if (voicePoll) clearInterval(voicePoll);
+    voicePoll = undefined;
+    mic?.hide();
+    if (v?.error) void vscode.window.showWarningMessage(`Kira voice stopped: ${v.error}`);
+    return;
+  }
+  mic.text = `$(mic-filled) Kira${v.ackP50Ms !== undefined ? ` · ${(v.ackP50Ms / 1000).toFixed(1)}s` : ""}`;
+  mic.tooltip = `Kira is listening (${v.input ?? "default mic"}). Click to stop voice.${v.samples ? ` Median acknowledgement ${v.ackP50Ms} ms over ${v.samples}.` : ""}`;
+  mic.show();
+  voicePoll ??= setInterval(() => {
+    const c = client;
+    if (!c) return setMic(undefined);
+    c.request<VoiceStatus>(Methods.voiceStatus).then(
+      (s) => {
+        if (!s.running) output.appendLine(`[kira] voice stopped${s.error ? `: ${s.error}` : ""}`);
+        setMic(s);
+      },
+      () => setMic(undefined),
+    );
+  }, 5_000);
 }
 
 async function openDeck(): Promise<void> {

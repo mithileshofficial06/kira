@@ -26,6 +26,10 @@ class VoiceSpeaker:
     def playing(self) -> bool:
         return self.player.playing
 
+    @property
+    def audible_until(self) -> float:
+        return self.player.audible_until
+
     def say_cached(self, phrase: str, on_first_audio: Callable[[float], None] | None = None) -> bool:
         clip = self.cache.get(phrase)
         if clip is None:
@@ -39,14 +43,16 @@ class VoiceSpeaker:
             self._generation += 1
         self.player.hush()
 
-    def say(self, text: str, speech_id: str) -> None:
+    def say(self, text: str, speech_id: str, on_done: Callable[[], None] | None = None) -> None:
         if not text.strip():
+            if on_done:
+                on_done()
             return
         with self._lock:
             gen = self._generation
-        threading.Thread(target=self._speak, args=(text, speech_id, gen), name="kira-voice-tts", daemon=True).start()
+        threading.Thread(target=self._speak, args=(text, speech_id, gen, on_done), name="kira-voice-tts", daemon=True).start()
 
-    def _speak(self, text: str, speech_id: str, gen: int) -> None:
+    def _speak(self, text: str, speech_id: str, gen: int, on_done: Callable[[], None] | None = None) -> None:
         cancelled = lambda: gen != self._generation  # noqa: E731
         self.emit({"type": "speaking", "state": "start", "id": speech_id})
         try:
@@ -63,3 +69,5 @@ class VoiceSpeaker:
             self.emit({"type": "log", "level": "warn", "msg": f"speech failed: {e}"})
         finally:
             self.emit({"type": "speaking", "state": "end", "id": speech_id})
+            if on_done:
+                on_done()

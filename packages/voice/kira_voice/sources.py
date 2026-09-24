@@ -69,6 +69,42 @@ class MicSource:
         self.stream.close()
 
 
+class InjectSource:
+    """Real-time silence, with speech mixed in on demand (end-to-end tests drive a whole session this way)."""
+
+    name = "injected speech"
+
+    def __init__(self) -> None:
+        self._q: queue.Queue[np.ndarray] = queue.Queue()
+        self.closed = False
+
+    def hear(self, audio: np.ndarray) -> None:
+        self._q.put(audio.astype(np.float32))
+
+    def frames(self) -> Iterator[np.ndarray]:
+        silence = np.zeros(FRAME, dtype=np.float32)
+        pending = np.zeros(0, dtype=np.float32)
+        start, i = time.monotonic(), 0
+        while not self.closed:
+            if len(pending) < FRAME:
+                try:
+                    pending = np.concatenate([pending, self._q.get_nowait()])
+                except queue.Empty:
+                    pass
+            if len(pending) >= FRAME:
+                f, pending = pending[:FRAME], pending[FRAME:]
+            else:
+                f, pending = (np.concatenate([pending, silence[: FRAME - len(pending)]]) if len(pending) else silence), np.zeros(0, dtype=np.float32)
+            i += 1
+            delay = start + i * FRAME / SAMPLE_RATE - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            yield f
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def read_wav(path: str) -> np.ndarray:
     with wave.open(path) as w:
         rate, width, ch = w.getframerate(), w.getsampwidth(), w.getnchannels()

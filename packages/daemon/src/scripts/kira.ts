@@ -2,9 +2,12 @@
  * Kira without VS Code: wake it by voice (or type), in any folder.
  *
  *   npm run kira -- --voice --workspace C:\path\to\project
+ *   npm run kira -- --voice --always-listen --workspace DIR  (no wake word at all)
  *   npm run kira -- --workspace C:\path\to\project        (type goals instead)
  *
  * Say "Kira, <task>". "Kira, stop" (or just "stop" during a run) interrupts.
+ * Questions ("Kira, what can you do?") get a spoken answer instead of a run.
+ * After Kira answers or asks something, reply without saying "Kira" again.
  * "Kira, where did we leave off?" and "Kira, status" answer out loud.
  * Approvals: say "yes" / "no, <reason>", or type y / n in this terminal.
  */
@@ -26,6 +29,7 @@ const { values } = parseArgs({
   options: {
     workspace: { type: "string" },
     voice: { type: "boolean", default: false },
+    "always-listen": { type: "boolean", default: false },
     autonomy: { type: "string", default: "3" },
     "init-git": { type: "boolean", default: false },
     "no-verify": { type: "boolean", default: false },
@@ -58,7 +62,7 @@ const daemon = new KiraDaemon({
   initGit: values["init-git"],
   defaults: { autonomy: Number(values.autonomy) as AutonomyLevel },
   log: (l) => console.log(dim(l)),
-  ...(mistralKey ? { voice: { mistralApiKey: mistralKey, args: values["voice-args"] ? values["voice-args"].split(" ") : [] } } : {}),
+  ...(mistralKey ? { voice: { mistralApiKey: mistralKey, args: [...(values["always-listen"] ? ["--always-listen"] : []), ...(values["voice-args"] ? values["voice-args"].split(" ") : [])] } } : {}),
 });
 
 daemon.onEvent((k: KiraEvent) => {
@@ -96,7 +100,12 @@ if (values.voice) {
   }
   console.log("[kira] starting voice (first start downloads the local wake model, ~75 MB)…");
   const st = await daemon.voiceStart();
-  console.log(`[kira] listening on "${st.input}", speaking on "${st.output}" (voice ${st.voice}). Say "Kira, …".`);
+  console.log(`[kira] listening on "${st.input}", speaking on "${st.output}" (voice ${st.voice}).`);
+  console.log(
+    values["always-listen"]
+      ? '[kira] always listening: just talk. Say "stop" to interrupt a run.'
+      : '[kira] say "Kira, …" to start; after Kira answers, reply without the name. "stop" interrupts a run.',
+  );
 } else {
   console.log('[kira] type a goal and press Enter ("stop" interrupts, "exit" quits).');
 }

@@ -14,9 +14,10 @@ Sidecar -> daemon (stdout):
     {"type": "log", "level": "info"|"warn"|"error", "msg": str}
 
 Daemon -> sidecar (stdin):
-    {"type": "say", "id": str, "text": str}
+    {"type": "say", "id": str, "text": str, "listen"?: bool}   # listen: the next sentence needs no wake word
     {"type": "hush"}
-    {"type": "state", "running": bool}
+    {"type": "state", "running": bool, "awaiting"?: bool}      # awaiting: an approval wants yes or no
+    {"type": "hear", "text": str}   # only with --source inject: speak this into the "mic" (tests)
     {"type": "shutdown"}
 """
 from __future__ import annotations
