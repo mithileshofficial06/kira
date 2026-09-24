@@ -2,3 +2,4 @@ dist/
 media/deck.js
 media/xterm.css
 .vscode-test/
+media/assistant.js

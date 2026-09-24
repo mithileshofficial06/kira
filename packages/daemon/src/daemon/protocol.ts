@@ -4,6 +4,9 @@
  */
 import type { KiraEvent } from "../control/events.js";
 import type { DeckState } from "./deck.js";
+import type { VoiceUiEvent } from "../voice/bridge.js";
+
+export type { VoiceUiEvent };
 
 export const PROTOCOL_VERSION = 1;
 
@@ -88,7 +91,11 @@ export const Methods = {
   voiceStart: "voice/start",
   voiceStop: "voice/stop",
   voiceStatus: "voice/status",
+  /** A typed message to Kira: answered like speech while voice is on, else started as a run. */
+  voiceAsk: "voice/ask",
   shutdown: "kira/shutdown",
   /** Notification, daemon -> client. */
   event: "kira/event",
+  /** Notification, daemon -> client: live voice activity (VoiceUiEvent), for the assistant view. */
+  voiceEvent: "kira/voice",
 } as const;

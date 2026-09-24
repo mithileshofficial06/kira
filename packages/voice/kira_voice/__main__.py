@@ -24,9 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--input-device", type=int, default=None)
     ap.add_argument("--output-device", type=int, default=None)
     ap.add_argument("--voice", default=os.environ.get("KIRA_VOICE", "gb_jane_confident"))
-    ap.add_argument("--whisper", default="tiny.en", help="local model for wake and stop spotting")
+    ap.add_argument("--whisper", default=os.environ.get("KIRA_WHISPER", "base.en"), help="local model for wake and stop spotting (tiny.en is faster, less accurate)")
     ap.add_argument("--no-cloud-stt", action="store_true", help="use only the local transcript")
     ap.add_argument("--always-listen", action="store_true", help="no wake word: every sentence is for Kira")
+    ap.add_argument("--save-audio", default=None, metavar="DIR", help="keep every utterance (cleaned WAV + both transcripts) for tuning")
     ap.add_argument("--list-devices", action="store_true")
     args = ap.parse_args(argv)
 
@@ -41,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
         protocol.log("no Mistral API key: set KIRA_MISTRAL_API_KEY", "error")
         return 2
 
+    import numpy as np
+
     from .engine import Engine
     from .sources import FileSource, InjectSource, MicSource, resample
     from .speaker import VoiceSpeaker
@@ -54,8 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     player = Player(tts.sample_rate, device=args.output_device)
     speaker = VoiceSpeaker(tts, cache, player)
     local = LocalWhisper(args.whisper)
+    local.transcribe(np.zeros(16000, dtype=np.float32))  # the first call is slow: pay for it before anyone speaks
     cloud = None if args.no_cloud_stt else VoxtralTranscriber(key)
-    engine = Engine(Segmenter(SileroVAD()), local, cloud, speaker, require_wake=not args.always_listen)
+    engine = Engine(Segmenter(SileroVAD()), local, cloud, speaker, require_wake=not args.always_listen, save_dir=args.save_audio)
 
     if args.source == "mic":
         source = MicSource(args.input_device)

@@ -7,7 +7,7 @@
   "publisher": "kira-dev",
   "license": "UNLICENSED",
   "engines": {
-    "vscode": "^1.100.0"
+    "vscode": "^1.105.0"
   },
   "categories": [
     "AI",
@@ -44,7 +44,7 @@
       },
       {
         "command": "kira.remember",
-        "title": "Remember…",
+        "title": "Remember\u2026",
         "category": "Kira"
       },
       {
@@ -58,6 +58,12 @@
         "title": "Stop Voice",
         "category": "Kira",
         "icon": "$(mic-filled)"
+      },
+      {
+        "command": "kira.openAssistant",
+        "title": "Open Assistant",
+        "category": "Kira",
+        "icon": "$(hubot)"
       },
       {
         "command": "kira.restartDaemon",
@@ -75,6 +81,11 @@
         "command": "kira.flightDeck",
         "key": "ctrl+alt+k",
         "mac": "cmd+alt+k"
+      },
+      {
+        "command": "kira.openAssistant",
+        "key": "ctrl+alt+j",
+        "mac": "cmd+alt+j"
       }
     ],
     "configuration": {
@@ -120,13 +131,33 @@
           "description": "Run the verification ladder (typecheck, build, tests, boot, browser, critic) before accepting 'done'."
         }
       }
+    },
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "kira-assistant",
+          "title": "Kira",
+          "icon": "media/kira.svg"
+        }
+      ]
+    },
+    "views": {
+      "kira-assistant": [
+        {
+          "type": "webview",
+          "id": "kira.assistant",
+          "name": "Assistant",
+          "icon": "media/kira.svg"
+        }
+      ]
     }
   },
   "scripts": {
     "build": "node esbuild.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
     "test": "vitest run",
-    "test:vscode": "node test/integration/run.mjs"
+    "test:vscode": "node test/integration/run.mjs",
+    "install:vscode": "node esbuild.mjs && npx --yes @vscode/vsce@3 package --no-dependencies --allow-missing-repository --skip-license -o dist/kira-agent.vsix && code --install-extension dist/kira-agent.vsix --force"
   },
   "dependencies": {
     "vscode-jsonrpc": "^9.0.2"

@@ -18,7 +18,8 @@
     "spike": "npm run spike -w @kira/daemon --",
     "recall-probe": "npm run recall-probe -w @kira/daemon --",
     "kira": "npm run kira -w @kira/daemon --",
-    "voice-e2e": "npm run voice-e2e -w @kira/daemon"
+    "voice-e2e": "npm run voice-e2e -w @kira/daemon",
+    "vscode:install": "npm run install:vscode -w kira-agent"
   },
   "allowScripts": {
     "node-pty@1.1.0": true,

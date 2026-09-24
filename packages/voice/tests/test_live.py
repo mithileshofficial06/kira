@@ -45,7 +45,7 @@ KIRA_VOICE = "gb_jane_confident"
 
 @pytest.fixture(scope="module")
 def whisper() -> LocalWhisper:
-    return LocalWhisper("tiny.en")
+    return LocalWhisper(os.environ.get("KIRA_WHISPER", "base.en"))  # the sidecar's default
 
 
 def clip(text: str, voice: str = USER_VOICE) -> np.ndarray:

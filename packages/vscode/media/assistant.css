@@ -1,0 +1,65 @@
+/* Kira assistant (side bar). VS Code theme variables, so it follows light, dark and high-contrast themes. */
+:root {
+  --good: var(--vscode-testing-iconPassed, #3fb950);
+  --bad: var(--vscode-errorForeground, #f85149);
+  --warn: var(--vscode-editorWarning-foreground, #d29922);
+  --busy: var(--vscode-progressBar-background, #0e70c0);
+  --border: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  --muted: var(--vscode-descriptionForeground, #8b949e);
+}
+html, body { height: 100%; }
+body {
+  margin: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.45;
+}
+#app { display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; padding: 8px 12px 6px; }
+
+.stage { display: flex; flex-direction: column; align-items: center; padding-top: 4px; flex: none; }
+#orb { width: min(220px, 70vw); aspect-ratio: 1; display: block; }
+.caption {
+  margin-top: 2px; min-height: 1.45em; max-width: 100%; text-align: center; font-size: 1.1em; font-weight: 600;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+.sub { color: var(--muted); font-size: 0.9em; text-align: center; min-height: 1.3em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+body[data-mode="hearing"] .caption { color: var(--vscode-textLink-foreground); }
+
+.run { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 10px 0 4px; flex: none; }
+.run-head { display: flex; align-items: center; gap: 8px; }
+.run-head button { margin-left: auto; }
+.goal { margin-top: 4px; font-weight: 600; overflow-wrap: anywhere; }
+.approval { margin-top: 8px; padding: 8px; border-radius: 4px; border-left: 3px solid var(--warn); background: var(--vscode-inputValidation-warningBackground, rgba(210, 153, 34, 0.1)); overflow-wrap: anywhere; }
+.approval .row { display: flex; align-items: center; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.pill { padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; letter-spacing: .03em; border: 1px solid currentColor; text-transform: uppercase; }
+.pill.busy { color: var(--busy); } .pill.good { color: var(--good); } .pill.warn { color: var(--warn); }
+.muted { color: var(--muted); } .small { font-size: 0.9em; }
+
+.chat { flex: 1 1 auto; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+.msg { max-width: 88%; padding: 6px 10px; border-radius: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.msg.you { align-self: flex-end; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-bottom-right-radius: 3px; }
+.msg.kira { align-self: flex-start; background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.12)); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+.msg.note { align-self: center; color: var(--muted); font-size: 0.88em; text-align: center; }
+
+.composer { display: flex; gap: 6px; align-items: center; flex: none; padding-top: 6px; border-top: 1px solid var(--border); }
+.composer input {
+  flex: 1; min-width: 0; padding: 5px 8px; border-radius: 4px; font: inherit;
+  color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent);
+}
+.composer input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+button {
+  font: inherit; padding: 3px 10px; border-radius: 4px; cursor: pointer; border: 1px solid transparent;
+  color: var(--vscode-button-foreground); background: var(--vscode-button-background);
+}
+button:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+button:disabled { opacity: .5; cursor: default; }
+button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+button.danger { background: var(--bad); color: #fff; }
+button.icon { width: 30px; height: 28px; padding: 0; display: grid; place-items: center; flex: none; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+button.icon.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.footer { flex: none; text-align: right; font-size: 0.85em; padding-top: 4px; }
+.footer a { color: var(--vscode-textLink-foreground); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }

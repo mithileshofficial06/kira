@@ -6,7 +6,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ChatFn } from "../src/agent/loop.js";
 import { emptyDeck, reduceDeck } from "../src/daemon/deck.js";
@@ -231,4 +231,54 @@ describe("voice conversation (fake sidecar, real daemon)", () => {
     expect(awaiting).toContain(true);
     expect(awaiting.at(-1)).toBe(false);
   }, 60_000);
+});
+
+describe("voice in the VS Code assistant (fake sidecar, real daemon, real pipe)", () => {
+  it("a connected client sees what was heard and said, and a typed message is answered like speech", async () => {
+    const { createMessageConnection, SocketMessageReader, SocketMessageWriter } = await import("vscode-jsonrpc/node");
+    const { connect } = await import("node:net");
+    const { pipeName } = await import("../src/daemon/server.js");
+    const { Methods } = await import("../src/daemon/protocol.js");
+    const logFile = join(ws, "..", `${basename(ws)}-ui.log`);
+    process.env.KIRA_FAKE_HEAR = JSON.stringify([
+      { after: 800, event: { type: "utterance", text: "how are you?", heard: "Kira how are you", source: "voxtral", endOfSpeechAt: 0 } },
+    ]);
+    process.env.KIRA_FAKE_LOG = logFile;
+    const pipe = pipeName(ws);
+    const utility = talker(["I'm good. What are we building?", "Nothing is running right now."]);
+    daemon = new KiraDaemon({
+      workspace: ws,
+      pipe,
+      token: "tok",
+      chatFor: (role) => (role === "utility" ? utility : scripted([])),
+      defaults: { plan: false, verify: false },
+      voice: { mistralApiKey: "test", command: { file: process.execPath, args: [FAKE] } },
+    });
+    await daemon.listen();
+    const socket = connect(pipe);
+    await new Promise<void>((r) => socket.once("connect", r));
+    const conn = createMessageConnection(new SocketMessageReader(socket), new SocketMessageWriter(socket));
+    const seen: { type: string; text?: string }[] = [];
+    conn.onNotification(Methods.voiceEvent, (e: { type: string; text?: string }) => void seen.push(e));
+    conn.listen();
+    try {
+      await conn.sendRequest(Methods.hello, { token: "tok", client: "test" });
+      await conn.sendRequest(Methods.voiceStart);
+      await until(() => seen.some((e) => e.type === "say"));
+      expect(seen.filter((e) => e.type !== "log").map((e) => `${e.type}:${e.text ?? ""}`)).toEqual(["ready:", "utterance:how are you?", "say:I'm good. What are we building?"]);
+
+      await conn.sendRequest(Methods.voiceAsk, { text: "anything running?" });
+      await until(() => seen.filter((e) => e.type === "say").length === 2);
+      expect(seen.slice(-2).map((e) => `${e.type}:${e.text}`)).toEqual(["typed:anything running?", "say:Nothing is running right now."]);
+      expect(daemon.deckState().run).toBeUndefined();
+
+      // The sidecar was asked for levels (there is a UI) and given the project's words.
+      const cmds = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { type: string; on?: boolean; words?: string[] });
+      expect(cmds.find((c) => c.type === "meter")?.on).toBe(true);
+      expect(Array.isArray(cmds.find((c) => c.type === "vocab")?.words)).toBe(true);
+    } finally {
+      conn.dispose();
+      socket.destroy();
+    }
+  }, 30_000);
 });

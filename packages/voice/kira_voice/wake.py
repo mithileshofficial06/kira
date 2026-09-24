@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 
 # How Whisper tends to spell "Kira" (and "Hey Kira") in short, noisy clips.
-_NAMES = r"kira|keira|kiera|kyra|kiara|kirra|kera|keera|kearra|kiran?|chiara|ciara|cara|kara|keyra|kirah"
+_NAMES = r"kira|keira|kiera|kyra|kyrah|kiara|kirra|kiira|kera|keera|keara|kearra|kiran?|chiara|ciara|cara|kara|keyra|kirah|hira|qira"
 WAKE = re.compile(rf"^\W*(?:(?:hey|hi|ok|okay|yo)\W+)?(?:{_NAMES})\b[\s,.!?:;\-]*", re.IGNORECASE)
 
 STOP = re.compile(

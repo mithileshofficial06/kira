@@ -11,12 +11,15 @@ Sidecar -> daemon (stdout):
     {"type": "stop", "heard": str, "endOfSpeechAt": float}
     {"type": "speaking", "state": "start"|"end", "id": str}
     {"type": "latency", "kind": "ack"|"stop", "ms": float}
+    {"type": "level", "rms": float, "speech": bool}   # only with the meter on, about 10 per second
     {"type": "log", "level": "info"|"warn"|"error", "msg": str}
 
 Daemon -> sidecar (stdin):
     {"type": "say", "id": str, "text": str, "listen"?: bool}   # listen: the next sentence needs no wake word
     {"type": "hush"}
     {"type": "state", "running": bool, "awaiting"?: bool}      # awaiting: an approval wants yes or no
+    {"type": "vocab", "words": [str]}                          # project words Voxtral should spell right
+    {"type": "meter", "on": bool}                              # send "level" events (for a UI)
     {"type": "hear", "text": str}   # only with --source inject: speak this into the "mic" (tests)
     {"type": "shutdown"}
 """

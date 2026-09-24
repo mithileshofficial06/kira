@@ -10,8 +10,13 @@
  * After Kira answers or asks something, reply without saying "Kira" again.
  * "Kira, where did we leave off?" and "Kira, status" answer out loud.
  * Approvals: say "yes" / "no, <reason>", or type y / n in this terminal.
+ *
+ * Run it in a VS Code terminal (with the Kira extension installed) and Kira's
+ * assistant opens in that window's right-hand side bar: an orb that listens,
+ * thinks and speaks, the conversation, and the run's progress. --no-vscode opts out.
  */
 import { config as loadEnv } from "dotenv";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -20,7 +25,8 @@ import type { AutonomyLevel } from "../control/autonomy.js";
 import type { KiraEvent } from "../control/events.js";
 import { findConfig, loadModelsConfig } from "../config/models.js";
 import { pendingApprovals } from "../daemon/deck.js";
-import { KiraDaemon } from "../daemon/server.js";
+import { KiraDaemon, pipeName } from "../daemon/server.js";
+import { announce, findHook } from "../daemon/vscode-hook.js";
 import { openMemory } from "../memory/run-memory.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import { createVerifier } from "../verify/ladder.js";
@@ -34,6 +40,7 @@ const { values } = parseArgs({
     "init-git": { type: "boolean", default: false },
     "no-verify": { type: "boolean", default: false },
     "voice-args": { type: "string", default: "" },
+    "no-vscode": { type: "boolean", default: false },
   },
 });
 const workspace = resolve(values.workspace ?? process.cwd());
@@ -51,10 +58,14 @@ const mistralKey = process.env[config.providers.mistral?.apiKeyEnv ?? "MISTRAL_A
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const memory = await openMemory(workspace, registry, config);
+// In a VS Code terminal, the window shows the assistant: it connects to this daemon over a local pipe.
+const hook = values["no-vscode"] ? undefined : findHook(workspace);
+const pipe = hook ? pipeName(workspace) : "";
+const token = hook ? randomBytes(24).toString("hex") : "";
 const daemon = new KiraDaemon({
   workspace,
-  pipe: "",
-  token: "",
+  pipe,
+  token,
   chatFor: (role) => (req, signal, onFallback) => registry.chat(role, req, signal, onFallback),
   pricing: config.pricing,
   verifier: () => (values["no-verify"] ? undefined : createVerifier({ workspace, registry })),
@@ -93,6 +104,11 @@ daemon.onEvent((k: KiraEvent) => {
 });
 
 console.log(`[kira] workspace: ${workspace}`);
+if (hook) {
+  await daemon.listen();
+  const shown = await announce(hook, { pipe, token, workspace, pid: process.pid });
+  console.log(shown ? "[kira] assistant opened in VS Code (right side bar)." : dim("[kira] could not reach the Kira extension in VS Code; continuing in this terminal."));
+}
 if (values.voice) {
   if (!mistralKey) {
     console.error("Voice needs MISTRAL_API_KEY in .env (Voxtral speech).");

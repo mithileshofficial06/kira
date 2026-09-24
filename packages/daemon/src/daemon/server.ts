@@ -169,6 +169,7 @@ export class KiraDaemon {
     conn.onRequest(Methods.voiceStart, authed(() => this.voiceStart()));
     conn.onRequest(Methods.voiceStop, authed(() => this.voiceStop()));
     conn.onRequest(Methods.voiceStatus, authed(() => this.voiceStatus()));
+    conn.onRequest(Methods.voiceAsk, authed((p: { text: string }) => this.ask(p?.text ?? "")));
     conn.listen();
   }
 
@@ -312,7 +313,15 @@ export class KiraDaemon {
       chat: this.opts.chatFor("utility"),
       workspace: this.opts.workspace,
     };
-    this.voice = new VoiceBridge(host, { ...this.opts.voice, log: this.opts.log });
+    const userUi = this.opts.voice.onUiEvent;
+    this.voice = new VoiceBridge(host, {
+      ...this.opts.voice,
+      log: this.opts.log,
+      onUiEvent: (e) => {
+        userUi?.(e);
+        for (const c of this.clients) if (c.authed) void c.conn.sendNotification(Methods.voiceEvent, e).catch(() => undefined);
+      },
+    });
     this.voiceError = undefined;
     try {
       await this.voice.start();
@@ -322,6 +331,17 @@ export class KiraDaemon {
       throw new ResponseError(-32005, `voice failed to start: ${this.voiceError}`);
     }
     return this.voiceStatus();
+  }
+
+  /** A typed message: with voice on, answered like speech (a question gets a spoken reply); otherwise a run. */
+  ask(text: string): { ok: boolean; runId?: string } {
+    const t = text.trim();
+    if (!t) throw new ResponseError(-32602, "text is required");
+    if (this.voice?.running) {
+      void this.voice.ask(t).catch((err: unknown) => this.opts.log?.(`voice/ask failed: ${(err as Error).message}`));
+      return { ok: true };
+    }
+    return { ok: true, runId: this.start({ goal: t }).runId };
   }
 
   /** Tests: a sidecar started with --source inject hears `text` as speech. */

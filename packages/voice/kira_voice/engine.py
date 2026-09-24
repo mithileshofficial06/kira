@@ -14,9 +14,15 @@ Rules:
   no wake word. Speech that began while Kira was still audible, or that repeats
   what Kira just said, is its own echo and is ignored.
 - With require_wake=False ("always listen") every sentence counts.
+
+Accuracy: every utterance is cleaned up (audio.normalize) before it is
+transcribed. The local model only needs the first few seconds (wake word,
+"stop", and the first words that decide the acknowledgement); Voxtral hears
+the whole sentence, biased toward the project's vocabulary.
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -26,7 +32,9 @@ from typing import Any, Callable, Protocol
 import numpy as np
 
 from . import protocol
-from .vad import Segmenter, Utterance
+from .audio import normalize
+from .stt import to_wav
+from .vad import SAMPLE_RATE, Segmenter, Utterance
 from .wake import is_stop, is_yes_no, looks_like_task, similar, speakable, split_wake, word_count
 
 LISTEN_WINDOW_S = 8.0
@@ -39,6 +47,10 @@ ECHO_SLACK_S = 0.25
 YES_GRACE_S = 0.7
 #: After a sentence ends, how long to wait for more of it before acting on it.
 CONTINUE_GRACE_S = 1.2
+#: The local model transcribes only this much of an utterance: enough for the wake word and the first words.
+HEAD_S = 4.0
+#: With the meter on, send the mic level every this many frames (3 x 32 ms, about 10 Hz).
+METER_EVERY = 3
 
 
 class Transcriber(Protocol):
@@ -75,9 +87,13 @@ class Engine:
         emit: Callable[[dict[str, Any]], None] = protocol.emit,
         clock: Callable[[], float] = time.monotonic,
         require_wake: bool = True,
+        save_dir: str | None = None,
     ) -> None:
         self.segmenter, self.local, self.cloud, self.speaker, self.emit, self.clock = segmenter, local, cloud, speaker, emit, clock
         self.require_wake = require_wake
+        self.save_dir = save_dir
+        self.meter = False  # send "level" events (the VS Code assistant's orb follows the voice)
+        self._frames = 0
         self.running = False  # a Kira run is in progress (set by the daemon)
         self.awaiting = False  # an approval is waiting for "yes" or "no" (set by the daemon)
         self.listening_until = 0.0
@@ -102,6 +118,11 @@ class Engine:
         elif t == "state":
             self.running = bool(cmd.get("running"))
             self.awaiting = bool(cmd.get("awaiting"))
+        elif t == "vocab":
+            if self.cloud is not None and hasattr(self.cloud, "set_vocabulary"):
+                self.cloud.set_vocabulary([str(w) for w in cmd.get("words", [])])
+        elif t == "meter":
+            self.meter = bool(cmd.get("on"))
 
     def _follow_up(self) -> None:
         self.listening_until = self.clock() + FOLLOW_UP_S
@@ -111,6 +132,14 @@ class Engine:
         u = self.segmenter.feed(frame)
         if u is not None:
             self._work.put(u)
+        if self.meter:
+            self._frames += 1
+            if self._frames % METER_EVERY == 0:
+                self.emit({"type": "level", "rms": round(self.segmenter.level, 4), "speech": self.segmenter.in_speech})
+
+    def _hear(self, audio: np.ndarray) -> str:
+        """The local transcript of the start of an utterance: fast, private, good enough to route."""
+        return self.local.transcribe(normalize(audio[: int(HEAD_S * SAMPLE_RATE)]))
 
     def close(self) -> None:
         self._work.put(None)
@@ -149,7 +178,7 @@ class Engine:
         """Speech that overlapped Kira's audio and sounds like its acknowledgement is its echo."""
         if u.end_of_speech - u.duration_s + ECHO_SLACK_S >= self.speaker.audible_until:
             return False
-        return similar(self.local.transcribe(u.audio), "On it. Mm-hm. Yes?") >= 0.5
+        return similar(self._hear(u.audio), "On it. Mm-hm. Yes?") >= 0.5
 
     def _continuation(self, u: Utterance) -> tuple[np.ndarray, bool]:
         """People pause mid-sentence ("create hello.txt ... that says hi"). Wait briefly after the end of
@@ -179,7 +208,7 @@ class Engine:
         self._utterance_seq += 1
         speaking = self.speaker.playing
         t0 = time.perf_counter()
-        heard = self.local.transcribe(u.audio)
+        heard = self._hear(u.audio)
         self._stt_ms = (time.perf_counter() - t0) * 1000.0
         woke, rest = split_wake(heard)
         eos_epoch = protocol.now() - (self.clock() - u.end_of_speech) * 1000.0
@@ -220,21 +249,41 @@ class Engine:
             self.speaker.say_cached("On it." if looks_like_task(said) else "Mm-hm.", self._latency("ack", u.end_of_speech))
         audio, more = self._continuation(u)
         if more:
-            heard = self.local.transcribe(audio)
+            heard = self._hear(audio)
             woke2, rest2 = split_wake(heard)
             said = rest2 if woke2 else heard
         text, source = said, "local"
         # A lone "no" to a waiting approval: the cloud model tends to write a sound-alike ("know"). Trust the local one.
         short_answer = self.awaiting and is_yes_no(said) and word_count(said) <= 3
+        clean = normalize(audio)
         if self.cloud is not None and not short_answer:
             try:
-                accurate = self.cloud.transcribe(audio)
+                accurate = self.cloud.transcribe(clean)
                 a_woke, a_rest = split_wake(accurate)
                 text, source = (a_rest if a_woke else accurate) or text, "voxtral"
             except Exception as e:
                 self.emit({"type": "log", "level": "warn", "msg": f"Voxtral transcription failed, using the local transcript: {e}"})
+                if len(audio) > HEAD_S * SAMPLE_RATE:  # the head alone would cut the sentence short
+                    full = self.local.transcribe(clean)
+                    f_woke, f_rest = split_wake(full)
+                    text = (f_rest if f_woke else full) or text
+        self._save(clean, heard, text)
         if word_count(text) == 0:
             self.speaker.say_cached("Sorry, I didn't catch that.")
             return
         self.stats.utterances += 1
         self.emit({"type": "utterance", "text": text, "heard": heard, "source": source, "endOfSpeechAt": eos_epoch})
+
+    def _save(self, audio: np.ndarray, heard: str, text: str) -> None:
+        """--save-audio: keep each utterance with both transcripts, to tune recognition on a real voice."""
+        if not self.save_dir:
+            return
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            stem = os.path.join(self.save_dir, time.strftime("%Y%m%d-%H%M%S") + f"-{self._utterance_seq:03d}")
+            with open(stem + ".wav", "wb") as f:
+                f.write(to_wav(audio))
+            with open(stem + ".txt", "w", encoding="utf-8") as f:
+                f.write(f"local: {heard}\nfinal: {text}\n")
+        except OSError as e:
+            self.emit({"type": "log", "level": "warn", "msg": f"could not save audio: {e}"})

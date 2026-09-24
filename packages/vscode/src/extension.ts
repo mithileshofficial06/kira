@@ -2,7 +2,10 @@ import * as vscode from "vscode";
 import type { KiraEvent } from "../../daemon/src/control/events.js";
 import { pendingApprovals } from "../../daemon/src/daemon/deck.js";
 import { Methods, type MemoryItemView, type StartResult, type VoiceStatus } from "../../daemon/src/daemon/protocol.js";
+import type { AttachRequest } from "../../daemon/src/daemon/vscode-hook.js";
+import { ASSISTANT_VIEW, AssistantView, type FromAssistant } from "./assistant.js";
 import { DaemonClient } from "./daemon-client.js";
+import { startHook } from "./hook.js";
 import { FlightDeckPanel, type FromWebview } from "./panel.js";
 
 let client: DaemonClient | undefined;
@@ -13,6 +16,7 @@ let mic: vscode.StatusBarItem;
 /** Polls voice/status while listening, so a sidecar that dies does not leave a stale mic. */
 let voicePoll: ReturnType<typeof setInterval> | undefined;
 let context: vscode.ExtensionContext;
+let assistant: AssistantView;
 /** Approvals already shown as a notification, so each is asked once. */
 const notified = new Set<string>();
 
@@ -22,6 +26,9 @@ export interface KiraApi {
   daemonConnected(): boolean;
   panelOpen(): boolean;
   voiceListening(): boolean;
+  assistantVisible(): boolean;
+  /** Whether the current daemon was started by a terminal (`npm run kira`) rather than this extension. */
+  attached(): boolean;
 }
 
 export function activate(ctx: vscode.ExtensionContext): KiraApi {
@@ -33,6 +40,8 @@ export function activate(ctx: vscode.ExtensionContext): KiraApi {
   status.show();
   mic = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
   mic.command = "kira.stopVoice";
+  assistant = new AssistantView(ctx.extensionUri, (m) => void onAssistantMessage(m));
+  startHook(ctx, output, attachToTerminal);
 
   ctx.subscriptions.push(
     output,
@@ -45,6 +54,8 @@ export function activate(ctx: vscode.ExtensionContext): KiraApi {
     vscode.commands.registerCommand("kira.remember", remember),
     vscode.commands.registerCommand("kira.startVoice", startVoice),
     vscode.commands.registerCommand("kira.stopVoice", stopVoice),
+    vscode.commands.registerCommand("kira.openAssistant", () => assistant.reveal()),
+    vscode.window.registerWebviewViewProvider(ASSISTANT_VIEW, assistant, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.commands.registerCommand("kira.restartDaemon", async () => {
       client?.dispose();
       client = undefined;
@@ -53,7 +64,14 @@ export function activate(ctx: vscode.ExtensionContext): KiraApi {
     { dispose: () => client?.dispose() },
     { dispose: () => setMic(undefined) },
   );
-  return { deck: () => client?.deck, daemonConnected: () => !!client, panelOpen: () => !!FlightDeckPanel.current, voiceListening: () => !!voicePoll };
+  return {
+    deck: () => client?.deck,
+    daemonConnected: () => !!client,
+    panelOpen: () => !!FlightDeckPanel.current,
+    voiceListening: () => !!voicePoll,
+    assistantVisible: () => assistant.visible,
+    attached: () => !!client?.attached,
+  };
 }
 
 export function deactivate(): void {
@@ -69,27 +87,97 @@ async function ensureClient(): Promise<DaemonClient> {
   const root = workspaceRoot();
   if (!root) throw new Error("Open a folder first: Kira works on one workspace at a time.");
   FlightDeckPanel.current?.post({ type: "connection", status: "starting" });
+  assistant.post({ type: "connection", status: "starting" });
   starting ??= DaemonClient.start(context.extensionPath, root, output)
     .then((c) => {
-      client = c;
-      c.onEvent(onEvent);
-      c.onExit(() => {
-        client = undefined;
-        setMic(undefined);
-        setStatus("idle");
-        FlightDeckPanel.current?.post({ type: "connection", status: "stopped", message: "The daemon exited. Kira: Restart Daemon to reconnect." });
-        void vscode.window.showWarningMessage("The Kira daemon stopped.", "Restart").then((a) => {
-          if (a) void vscode.commands.executeCommand("kira.restartDaemon");
-        });
-      });
-      FlightDeckPanel.current?.post({ type: "connection", status: "connected" });
-      FlightDeckPanel.current?.post({ type: "snapshot", deck: c.deck });
+      useClient(c);
       return c;
     })
     .finally(() => {
       starting = undefined;
     });
   return starting;
+}
+
+/** Makes `c` the current daemon connection and routes its events to the status bar, Flight Deck and assistant. */
+function useClient(c: DaemonClient): void {
+  client = c;
+  c.onEvent(onEvent);
+  c.onVoice((e) => {
+    assistant.post({ type: "voice", event: e });
+    if (e.type === "ready") void refreshVoice();
+  });
+  c.onExit(() => {
+    if (client !== c) return;
+    client = undefined;
+    setMic(undefined);
+    setStatus("idle");
+    const message = c.attached ? "The terminal session ended. Run  npm run kira -- --voice  again." : "The daemon exited. Kira: Restart Daemon to reconnect.";
+    FlightDeckPanel.current?.post({ type: "connection", status: "stopped", message });
+    assistant.post({ type: "connection", status: "offline", message });
+    if (!c.attached) {
+      void vscode.window.showWarningMessage("The Kira daemon stopped.", "Restart").then((a) => {
+        if (a) void vscode.commands.executeCommand("kira.restartDaemon");
+      });
+    }
+  });
+  FlightDeckPanel.current?.post({ type: "connection", status: "connected" });
+  FlightDeckPanel.current?.post({ type: "snapshot", deck: c.deck });
+  assistant.post({ type: "connection", status: "connected" });
+  assistant.post({ type: "snapshot", deck: c.deck });
+}
+
+/** `npm run kira` in this window's terminal: attach to its daemon and show the assistant beside the code. */
+async function attachToTerminal(req: AttachRequest): Promise<void> {
+  output.appendLine(`[kira] terminal session (pid ${req.pid}) for ${req.workspace}`);
+  const c = await DaemonClient.attach(req.pipe, req.token, output);
+  const old = client;
+  if (old) {
+    client = undefined; // before dispose, so its exit is not reported as the new session's
+    old.dispose();
+  }
+  useClient(c);
+  await refreshVoice();
+  await assistant.reveal();
+  // The command was typed in the terminal: give the keyboard back to it.
+  void vscode.commands.executeCommand("workbench.action.terminal.focus");
+}
+
+async function refreshVoice(): Promise<void> {
+  const c = client;
+  if (!c) return;
+  const s = await c.request<VoiceStatus>(Methods.voiceStatus).catch(() => undefined);
+  if (!s) return;
+  assistant.post({ type: "voiceStatus", status: s });
+  setMic(s);
+}
+
+async function onAssistantMessage(m: FromAssistant): Promise<void> {
+  switch (m.type) {
+    case "ready":
+      if (client) {
+        assistant.post({ type: "connection", status: "connected" });
+        assistant.post({ type: "snapshot", deck: client.deck });
+        await refreshVoice();
+      } else {
+        assistant.post({ type: "connection", status: starting ? "starting" : "offline" });
+      }
+      return;
+    case "ask": {
+      const r = await withClient((c) => c.request<{ ok: boolean; runId?: string }>(Methods.voiceAsk, { text: m.text }));
+      if (r?.runId) output.appendLine(`[kira] started ${r.runId}: ${m.text}`);
+      return;
+    }
+    case "mic":
+      return m.on ? startVoice() : stopVoice();
+    case "stop":
+      return stopRun();
+    case "approve":
+      await withClient((c) => c.request(Methods.approve, { id: m.id, allow: m.allow }));
+      return;
+    case "flightDeck":
+      return openDeck();
+  }
 }
 
 async function withClient<T>(fn: (c: DaemonClient) => Promise<T>): Promise<T | undefined> {
@@ -154,9 +242,11 @@ async function remember(): Promise<void> {
 }
 
 async function startVoice(): Promise<void> {
+  void assistant.reveal();
   const r = await withClient((c) => c.request<VoiceStatus>(Methods.voiceStart));
   if (!r) return;
   setMic(r);
+  assistant.post({ type: "voiceStatus", status: r });
   output.appendLine(`[kira] voice listening: in ${r.input ?? "?"}, out ${r.output ?? "?"}, wake ${r.wake ?? "?"}`);
   void vscode.window.showInformationMessage(`Kira is listening. Say "${r.wake ?? "Kira"}, …", or "stop" to interrupt.`);
 }
@@ -165,6 +255,7 @@ async function stopVoice(): Promise<void> {
   if (!client) return setMic(undefined);
   const r = await withClient((c) => c.request<VoiceStatus>(Methods.voiceStop));
   setMic(r);
+  if (r) assistant.post({ type: "voiceStatus", status: r });
 }
 
 /** Shows the mic while voice runs; undefined or not running hides it and stops polling. */
@@ -244,6 +335,7 @@ async function refreshMemory(): Promise<void> {
 
 function onEvent(e: KiraEvent): void {
   FlightDeckPanel.current?.post({ type: "event", event: e });
+  assistant.post({ type: "event", event: e });
   const deck = client?.deck;
   if (!deck) return;
 
@@ -260,7 +352,7 @@ function onEvent(e: KiraEvent): void {
   if (e.type === "approval") {
     setStatus("approval");
     // In the panel the approval card is enough; otherwise ask where the human will see it.
-    if (!FlightDeckPanel.current?.visible && !notified.has(e.id)) {
+    if (!FlightDeckPanel.current?.visible && !assistant.visible && !notified.has(e.id)) {
       notified.add(e.id);
       void askInline(e.id, e.request.category, e.request.summary);
     }

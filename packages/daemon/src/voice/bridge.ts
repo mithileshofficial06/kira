@@ -14,6 +14,7 @@ import type { ChatFn } from "../agent/loop.js";
 import { Conversation } from "./converse.js";
 import { classify, TASK } from "./intents.js";
 import { narrate, statusLine } from "./narrator.js";
+import { projectVocabulary } from "./vocab.js";
 
 /** What the sidecar sends (see packages/voice/kira_voice/protocol.py). */
 export type VoiceEvent =
@@ -23,7 +24,14 @@ export type VoiceEvent =
   | { type: "stop"; heard: string; endOfSpeechAt: number }
   | { type: "speaking"; state: "start" | "end"; id: string }
   | { type: "latency"; kind: "ack" | "stop"; ms: number }
+  | { type: "level"; rms: number; speech: boolean }
   | { type: "log"; level: string; msg: string };
+
+/**
+ * What a UI (the VS Code assistant) sees: the sidecar's events plus what Kira
+ * decided to say, and typed messages the bridge answered.
+ */
+export type VoiceUiEvent = VoiceEvent | { type: "say"; id: string; text: string } | { type: "typed"; text: string };
 
 /** The parts of the daemon voice needs. KiraDaemon implements it. */
 export interface VoiceHost {
@@ -49,6 +57,8 @@ export interface VoiceOptions {
   log?: (line: string) => void;
   /** Every sidecar event, for the Flight Deck and tests. */
   onVoiceEvent?: (e: VoiceEvent) => void;
+  /** Everything a UI shows (turns the sidecar's level meter on). */
+  onUiEvent?: (e: VoiceUiEvent) => void;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -129,6 +139,14 @@ export class VoiceBridge {
       clearTimeout(timer);
     }
     this.sync();
+    if (this.opts.onUiEvent) this.send({ type: "meter", on: true });
+    if (this.host.workspace) {
+      try {
+        this.send({ type: "vocab", words: projectVocabulary(this.host.workspace) });
+      } catch (err) {
+        log(`[voice] could not read the project's vocabulary: ${(err as Error).message}`);
+      }
+    }
   }
 
   async stop(): Promise<void> {
@@ -145,7 +163,15 @@ export class VoiceBridge {
   /** listen: the human is expected to answer, so the next sentence needs no wake word. */
   say(text: string, listen = false): void {
     this.opts.log?.(`kira says: ${text}`);
-    this.send({ type: "say", id: `s${++this.speechSeq}`, text, ...(listen ? { listen: true } : {}) });
+    const id = `s${++this.speechSeq}`;
+    this.opts.onUiEvent?.({ type: "say", id, text });
+    this.send({ type: "say", id, text, ...(listen ? { listen: true } : {}) });
+  }
+
+  /** A typed message (the assistant's text box): answered exactly as if it had been said. */
+  async ask(text: string): Promise<void> {
+    this.opts.onUiEvent?.({ type: "typed", text });
+    await this.route(text);
   }
 
   /** Tests: speak `text` into a sidecar started with --source inject, as if a person said it. */
@@ -171,6 +197,8 @@ export class VoiceBridge {
   }
 
   private onVoice(ev: VoiceEvent): void {
+    this.opts.onUiEvent?.(ev);
+    if (ev.type === "level") return;
     this.opts.onVoiceEvent?.(ev);
     const log = this.opts.log ?? (() => {});
     switch (ev.type) {
