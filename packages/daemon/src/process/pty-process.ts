@@ -3,6 +3,9 @@ import { AbortedError } from "../util/abort.js";
 import { listDescendants } from "./descendants.js";
 import { isAlive, killTree, waitForExit } from "./kill-tree.js";
 
+const DA_QUERY = "\u001b[c";
+const DA_REPLY = "\u001b[?1;0c";
+
 export interface PtySpawnOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
@@ -36,16 +39,43 @@ export class PtyProcess {
       env: { ...process.env, ...opts.env, FORCE_COLOR: "0", NO_COLOR: "1", CI: "1" } as Record<string, string>,
       cols: opts.cols ?? 160,
       rows: opts.rows ?? 40,
+      // node-pty's bundled ConPTY: its kill() closes the pseudo-console directly
+      // instead of forking a console-list agent (which fails noisily with
+      // "AttachConsole failed"). Kira kills the process tree itself.
+      useConptyDll: true,
     });
     this.term.onData((d) => {
+      // The console host asks "what terminal are you?" (Device Attributes) at
+      // startup and stalls ~3s if nobody answers. Answer as a VT100 would.
+      if (!this.answeredDA && d.includes(DA_QUERY)) {
+        this.answeredDA = true;
+        this.term.write(DA_REPLY);
+      }
       for (const l of this.listeners) l(d);
     });
     this.exited = new Promise((resolve) => {
       this.term.onExit(({ exitCode }) => {
         this.exitCode = exitCode;
+        // The shell is gone but the console host is not: close the pseudo-console
+        // or a conhost/OpenConsole process is left behind for every command.
+        this.closeConsole();
         resolve(exitCode);
       });
     });
+  }
+
+  private consoleClosed = false;
+  private answeredDA = false;
+
+  /** Releases the pseudo-terminal (ConPTY host on Windows). Safe to call repeatedly. */
+  private closeConsole(): void {
+    if (this.consoleClosed) return;
+    this.consoleClosed = true;
+    try {
+      this.term.kill();
+    } catch {
+      /* already released */
+    }
   }
 
   static spawn(command: string, opts: PtySpawnOptions): PtyProcess {
@@ -83,19 +113,11 @@ export class PtyProcess {
     // 1. Snapshot first: once the shell dies, its children are re-parented out of reach of /T.
     const snapshot = await listDescendants(root).catch(() => [] as number[]);
     const pids = [root, ...snapshot];
-    // 2. POSIX: node-pty's own kill (SIGHUP to the session). On Windows it forks
-    //    a console-list agent that often fails with "AttachConsole failed", and
-    //    steps 3-4 already cover the tree, so it is skipped there.
-    if (process.platform !== "win32") {
-      try {
-        this.term.kill();
-      } catch {
-        /* already gone */
-      }
-    }
-    // 3. Walk the tree from the shell, then 4. anything in the snapshot that survived.
+    // 2. Walk the tree from the shell, then 3. anything in the snapshot that survived.
     await killTree(root);
     await Promise.all(snapshot.filter(isAlive).map((p) => killTree(p)));
+    // 4. Release the pseudo-console (SIGHUP on POSIX, closes the ConPTY host on Windows).
+    this.closeConsole();
     // 5. Verify.
     try {
       await waitForExit(pids, 5_000);

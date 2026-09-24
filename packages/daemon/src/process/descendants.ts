@@ -5,25 +5,27 @@ interface ProcRow {
   ppid: number;
 }
 
-function run(file: string, args: string[]): Promise<string> {
+/** Runs a command and returns its stdout and its own PID (so it can be left out of the table). */
+function run(file: string, args: string[]): Promise<{ stdout: string; pid: number | undefined }> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) =>
-      err ? reject(err) : resolve(stdout),
+    const child = execFile(file, args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) =>
+      err ? reject(err) : resolve({ stdout, pid: child.pid }),
     );
   });
 }
 
 async function processTable(): Promise<ProcRow[]> {
-  if (process.platform === "win32") {
-    const out = await run("powershell.exe", [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
-    ]);
-    return parseRows(out);
-  }
-  return parseRows(await run("ps", ["-A", "-o", "pid=,ppid="]));
+  const { stdout, pid: self } =
+    process.platform === "win32"
+      ? await run("powershell.exe", [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+        ])
+      : await run("ps", ["-A", "-o", "pid=,ppid="]);
+  // The listing process is a child of ours; it is not part of any tree we care about.
+  return parseRows(stdout).filter((r) => r.pid !== self && r.ppid !== self);
 }
 
 function parseRows(out: string): ProcRow[] {
