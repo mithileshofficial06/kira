@@ -70,6 +70,17 @@ describe("tool-call ids", () => {
 });
 
 describe("classifyProviderError", () => {
+  it("treats capacity errors sent mid-stream (no status) as a provider outage, not a crash", () => {
+    // Seen live from NIM: an error event inside the SSE stream, no HTTP status.
+    expect(classifyProviderError("nim", new Error("Service temporarily overloaded"))).toBeInstanceOf(ProviderUnavailableError);
+    expect(classifyProviderError("mistral", new Error("Not enough capacity available for this request, please retry later."))).toBeInstanceOf(
+      ProviderUnavailableError,
+    );
+    // A 400 that merely mentions the word is still a real error.
+    const bad = { status: 400, message: "invalid request: model overloaded param" };
+    expect(classifyProviderError("nim", bad)).toBe(bad);
+  });
+
   it("maps 429 to RateLimitedError with retry-after", () => {
     const err = classifyProviderError("nim", { status: 429, headers: { "retry-after": "7" }, message: "slow down" });
     expect(err).toBeInstanceOf(RateLimitedError);

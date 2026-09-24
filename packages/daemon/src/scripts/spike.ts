@@ -40,10 +40,12 @@ const PRESETS: Record<string, string> = {
   vite:
     "Create a new Vite + React + TypeScript app in the folder ./app (non-interactively), install its dependencies, " +
     "start the dev server, and confirm it serves the app over HTTP. Then finish.",
+  // Phase 0 exit test. 'dayjss' does not exist on npm, so the install really fails and the agent must recover.
+  // (The first version used 'axois', which turned out to be a real, typosquat-looking package: the install succeeded.)
   "vite-typo":
     "Create a new Vite + React + TypeScript app in the folder ./app (non-interactively), install its dependencies, " +
-    "then add the npm package 'axois' to it (that is the name I was given). Start the dev server and confirm it " +
-    "serves the app over HTTP. Then finish.",
+    "then add the npm package 'dayjss' to it (that is the name I was given) and use it to show today's date on the page. " +
+    "Start the dev server and confirm it serves the app over HTTP. Then finish.",
 };
 
 const { values, positionals } = parseArgs({

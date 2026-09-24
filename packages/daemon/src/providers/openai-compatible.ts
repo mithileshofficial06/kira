@@ -75,6 +75,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
     } catch (err) {
       throw this.wrap(err, signal);
     }
+    // The SDK ends an aborted stream quietly. A cut-off turn must never look like a finished one.
+    if (signal.aborted) throw new AbortedError(signal.reason);
     for (const call of calls.finish()) yield { type: "tool_call", call };
     yield { type: "done", finishReason, usage };
   }

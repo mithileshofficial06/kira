@@ -50,8 +50,14 @@ export function classifyProviderError(provider: string, err: unknown): unknown {
   if (err instanceof Error && isNetworkFailure(err)) {
     return new ProviderUnavailableError(provider, undefined, message);
   }
+  // Capacity errors sent inside a stream arrive with no HTTP status ("Service temporarily overloaded").
+  if (status === undefined && OVERLOADED.test(message)) {
+    return new ProviderUnavailableError(provider, undefined, message);
+  }
   return err;
 }
+
+const OVERLOADED = /overloaded|out of capacity|not enough capacity|temporarily unavailable|service unavailable|try again later|server (is )?busy/i;
 
 const NETWORK_MESSAGE = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|fetch failed|Connection error|terminated|socket hang up|other side closed|premature close/i;
 const NETWORK_CODE = /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|UND_ERR_\w+)$/;

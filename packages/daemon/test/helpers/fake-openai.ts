@@ -14,7 +14,9 @@ export type FakeResponse =
   | { kind: "turn"; turn: FakeTurn }
   | { kind: "status"; status: number; headers?: Record<string, string>; body?: string }
   /** Sends some text, then kills the socket mid-stream. */
-  | { kind: "drop"; text: string };
+  | { kind: "drop"; text: string }
+  /** Streams a text chunk every `everyMs` until the client goes away; `onClose` fires when it does. */
+  | { kind: "slow"; everyMs: number; onClose: () => void };
 
 export interface FakeRequest {
   n: number;
@@ -51,6 +53,15 @@ export async function startFakeOpenAI(handler: (req: FakeRequest) => FakeRespons
     const send = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
     const chunk = (delta: unknown, finish: string | null = null) =>
       send({ id: "c", object: "chat.completion.chunk", created: 0, model: json.model, choices: [{ index: 0, delta, finish_reason: finish }] });
+    if (out.kind === "slow") {
+      chunk({ role: "assistant", content: "" });
+      const timer = setInterval(() => chunk({ content: "word " }), out.everyMs);
+      res.on("close", () => {
+        clearInterval(timer);
+        out.onClose();
+      });
+      return;
+    }
     if (out.kind === "drop") {
       chunk({ role: "assistant", content: out.text });
       setTimeout(() => res.socket?.destroy(), 20);
