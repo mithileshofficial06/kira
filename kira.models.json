@@ -1,0 +1,35 @@
+{
+  "$comment": "Model IDs change often. Run `npm run check-models` to verify every entry against the live catalogs.",
+  "providers": {
+    "mistral": {
+      "baseURL": "https://api.mistral.ai/v1",
+      "apiKeyEnv": "MISTRAL_API_KEY",
+      "requestsPerMinute": 60
+    },
+    "nim": {
+      "baseURL": "https://integrate.api.nvidia.com/v1",
+      "apiKeyEnv": "NVIDIA_API_KEY",
+      "requestsPerMinute": 35
+    }
+  },
+  "roles": {
+    "planner": [
+      { "provider": "mistral", "model": "mistral-medium-latest" },
+      { "provider": "mistral", "model": "mistral-large-latest" }
+    ],
+    "executor": [
+      { "provider": "mistral", "model": "devstral-latest" },
+      { "provider": "mistral", "model": "mistral-medium-latest" },
+      { "provider": "nim", "model": "qwen/qwen3-coder-480b-a35b-instruct" }
+    ],
+    "critic": [
+      { "provider": "nim", "model": "qwen/qwen3-coder-480b-a35b-instruct" },
+      { "provider": "nim", "model": "moonshotai/kimi-k2-instruct" },
+      { "provider": "mistral", "model": "mistral-large-latest" }
+    ],
+    "utility": [
+      { "provider": "mistral", "model": "mistral-small-latest" },
+      { "provider": "nim", "model": "meta/llama-3.1-8b-instruct" }
+    ]
+  }
+}
