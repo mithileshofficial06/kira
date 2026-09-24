@@ -1,3 +1,4 @@
+import type { CheckpointManager } from "../checkpoint/manager.js";
 import type { ModelRef } from "../config/models.js";
 import type { FallbackEvent, RoleChatEvent } from "../providers/registry.js";
 import type { ChatMessage, ChatRequest, ToolCall, Usage } from "../providers/types.js";
@@ -35,6 +36,8 @@ export interface RunOptions {
   /** Consecutive turns without a tool call before the run stops as stalled. */
   maxIdleTurns?: number;
   onEvent?: (e: AgentEvent) => void;
+  /** When set, every step is preceded by a checkpoint and an interrupt rewinds the interrupted step. */
+  checkpoints?: { manager: CheckpointManager; runId: string };
 }
 
 export interface RunResult {
@@ -46,6 +49,8 @@ export interface RunResult {
   models: ModelRef[];
   /** Committed history: only complete turns, never a call without its result. */
   messages: ChatMessage[];
+  /** Set when an interrupt rolled the workspace back to the start of the interrupted step. */
+  rewound?: { step: number; restored: string[]; removed: string[]; undoRef: string };
 }
 
 /**
@@ -83,10 +88,16 @@ export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResul
   });
 
   let step = 0;
+  let checkpointedStep = 0;
   try {
     while (step < maxSteps) {
       step++;
       emit("step", step, `step ${step}/${maxSteps}`);
+      if (opts.checkpoints) {
+        const c = await opts.checkpoints.manager.create(opts.checkpoints.runId, step);
+        checkpointedStep = step;
+        emit("note", step, `checkpoint ${c.ref} ${c.sha.slice(0, 8)}`);
+      }
 
       // ---- model turn --------------------------------------------------
       let text = "";
@@ -150,14 +161,26 @@ export async function runAgent(chat: ChatFn, opts: RunOptions): Promise<RunResul
     return result("budget", `Step budget (${maxSteps}) used up before the goal was verified.`, step);
   } catch (err) {
     if (isAbortError(err) || opts.signal.aborted) {
-      return result("aborted", `Interrupted during step ${step}. History kept up to the last complete turn.`, step);
+      // Processes first, so nothing writes to the tree while it is being rewound.
+      await stopBackground(opts, emit, step);
+      const r = result("aborted", `Interrupted during step ${step}. History kept up to the last complete turn.`, step);
+      if (opts.checkpoints && checkpointedStep === step && step > 0) {
+        const rep = await opts.checkpoints.manager.restore(opts.checkpoints.runId, step);
+        r.rewound = { step, restored: rep.restored, removed: rep.removed, undoRef: rep.undo.ref };
+        r.summary += ` Workspace rewound to the start of step ${step} (${rep.restored.length} restored, ${rep.removed.length} removed; undo: ${rep.undo.ref}).`;
+      }
+      return r;
     }
     throw err;
   } finally {
-    const reports = await opts.ctx.background.stopAll();
-    const survivors = reports.flatMap((r) => r.survivors);
-    if (survivors.length) emit("note", step, `WARNING: background PIDs survived shutdown: ${survivors.join(", ")}`);
+    await stopBackground(opts, emit, step);
   }
+}
+
+async function stopBackground(opts: RunOptions, emit: (t: AgentEvent["type"], s: number, x: string) => void, step: number) {
+  const reports = await opts.ctx.background.stopAll();
+  const survivors = reports.flatMap((r) => r.survivors);
+  if (survivors.length) emit("note", step, `WARNING: background PIDs survived shutdown: ${survivors.join(", ")}`);
 }
 
 async function executeCall(

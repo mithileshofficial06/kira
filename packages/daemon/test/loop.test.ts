@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runAgent, type ChatFn, type RunOptions } from "../src/agent/loop.js";
+import { CheckpointManager } from "../src/checkpoint/manager.js";
 import type { ChatMessage } from "../src/providers/types.js";
 import { newToolCallId } from "../src/providers/tool-calls.js";
 import { BackgroundManager, Gate, PHASE0_TOOLS } from "../src/tools/index.js";
@@ -160,6 +161,48 @@ describe("runAgent", () => {
     const assistants = r.messages.filter((m) => m.role === "assistant");
     expect(assistants).toHaveLength(1);
     assertTurnBoundaries(r.messages);
+  }, 30_000);
+
+  it("with checkpoints: an interrupt rewinds the partial writes of the interrupted step", async () => {
+    const manager = await CheckpointManager.open(ws, { initIfMissing: true });
+    const ac = new AbortController();
+    const node = `"${process.execPath}"`;
+    const chat = scripted([
+      { calls: [{ name: "write_file", args: { path: "a.txt", content: "good" } }] },
+      {
+        calls: [
+          { name: "write_file", args: { path: "a.txt", content: "half-done" } },
+          { name: "write_file", args: { path: "b.txt", content: "new" } },
+          { name: "run_command", args: { command: `${node} -e "setInterval(()=>{},1000)"` } },
+        ],
+      },
+    ]);
+    let commandStarted = false;
+    const run = runAgent(
+      chat,
+      opts({
+        signal: ac.signal,
+        checkpoints: { manager, runId: "t1" },
+        ctx: {
+          workspace: ws,
+          gate: new Gate(async () => true),
+          background,
+          log: (l) => {
+            if (l.startsWith("$ ")) commandStarted = true;
+          },
+        },
+      }),
+    );
+    while (!commandStarted) await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 500));
+    ac.abort("stop");
+    const r = await run;
+
+    expect(r.status).toBe("aborted");
+    expect(r.rewound?.step).toBe(2);
+    expect(await readFile(join(ws, "a.txt"), "utf8")).toBe("good");
+    expect(existsSync(join(ws, "b.txt"))).toBe(false);
+    expect((await manager.list("t1")).map((c) => c.step)).toEqual([1, 2]);
   }, 30_000);
 
   it("stops background processes when the run ends", async () => {
