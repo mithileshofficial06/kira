@@ -141,6 +141,6 @@ export const finishTool = defineTool({
     summary: z.string().min(1),
   }),
   async run({ outcome, summary }) {
-    return { content: "Run finished.", finished: { summary: `[${outcome}] ${summary}` } };
+    return { content: "Run finished.", finished: { outcome, summary } };
   },
 });

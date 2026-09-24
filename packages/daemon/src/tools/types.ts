@@ -18,7 +18,7 @@ export interface ToolResult {
   content: string;
   isError?: boolean;
   /** Set by the `finish` tool to end the run. */
-  finished?: { summary: string };
+  finished?: { outcome: "done" | "blocked" | "failed"; summary: string };
 }
 
 export interface Tool<S extends z.ZodType = z.ZodType> {
