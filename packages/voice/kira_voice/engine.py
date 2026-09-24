@@ -14,6 +14,8 @@ Rules:
   no wake word. Speech that began while Kira was still audible, or that repeats
   what Kira just said, is its own echo and is ignored.
 - With require_wake=False ("always listen") every sentence counts.
+- Push-to-talk audio from the phone ("audio" command) is addressed to Kira
+  by definition: no wake word, no echo rules, no waiting for more of it.
 
 Accuracy: every utterance is cleaned up (audio.normalize) before it is
 transcribed. The local model only needs the first few seconds (wake word,
@@ -22,6 +24,7 @@ the whole sentence, biased toward the project's vocabulary.
 """
 from __future__ import annotations
 
+import base64
 import os
 import queue
 import threading
@@ -123,6 +126,13 @@ class Engine:
                 self.cloud.set_vocabulary([str(w) for w in cmd.get("words", [])])
         elif t == "meter":
             self.meter = bool(cmd.get("on"))
+        elif t == "output":
+            if hasattr(self.speaker, "set_output"):
+                self.speaker.set_output(str(cmd.get("target", "laptop")))
+        elif t == "audio":
+            # Push-to-talk from the phone: 16 kHz mono int16, base64.
+            pcm = np.frombuffer(base64.b64decode(str(cmd.get("pcm", ""))), dtype="<i2").astype(np.float32) / 32768.0
+            self._work.put(Utterance(audio=pcm, end_of_speech=self.clock(), addressed=True))
 
     def _follow_up(self) -> None:
         self.listening_until = self.clock() + FOLLOW_UP_S
@@ -204,7 +214,10 @@ class Engine:
     # ---- one utterance -----------------------------------------------------------
     def handle(self, u: Utterance) -> None:
         if u.duration_s < 0.25:
+            if u.addressed:  # a tap on the talk button with nothing said
+                self.speaker.say_cached("Sorry, I didn't catch that.")
             return
+        addressed = u.addressed
         self._utterance_seq += 1
         speaking = self.speaker.playing
         t0 = time.perf_counter()
@@ -214,14 +227,16 @@ class Engine:
         eos_epoch = protocol.now() - (self.clock() - u.end_of_speech) * 1000.0
 
         # Stop: during a run, a bare "stop" works; while Kira is talking, it needs the wake word.
-        if (woke and is_stop(rest)) or (self.running and not speaking and is_stop(heard)):
+        if (woke and is_stop(rest)) or ((addressed or (self.running and not speaking)) and is_stop(heard)):
             self.stats.stops += 1
             self.speaker.hush()
             self.emit({"type": "stop", "heard": heard, "endOfSpeechAt": eos_epoch})
             self.speaker.say_cached("Stopping.", self._latency("stop", u.end_of_speech))
             return
 
-        if not woke:
+        if addressed:
+            self.speaker.hush()  # they pressed talk: Kira stops talking
+        elif not woke:
             listening = self.clock() < self.listening_until or self.awaiting or not self.require_wake
             if speaking or not listening:
                 self.stats.ignored += 1
@@ -247,7 +262,7 @@ class Engine:
         # A yes/no to a waiting approval needs no ack: the daemon answers it at once.
         if not (self.awaiting and is_yes_no(said)):
             self.speaker.say_cached("On it." if looks_like_task(said) else "Mm-hm.", self._latency("ack", u.end_of_speech))
-        audio, more = self._continuation(u)
+        audio, more = (u.audio, False) if addressed else self._continuation(u)
         if more:
             heard = self._hear(audio)
             woke2, rest2 = split_wake(heard)

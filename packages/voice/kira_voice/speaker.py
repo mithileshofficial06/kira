@@ -38,6 +38,11 @@ class VoiceSpeaker:
         self.player.play(clip, on_first_audio)
         return True
 
+    def set_output(self, target: str) -> None:
+        """"laptop", "remote" (the phone) or "both", when the player can route."""
+        if hasattr(self.player, "set_target"):
+            self.player.set_target(target)
+
     def hush(self) -> None:
         with self._lock:
             self._generation += 1

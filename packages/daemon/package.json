@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "vitest run",
     "check-models": "tsx src/scripts/check-models.ts",
     "spike": "tsx src/scripts/spike.ts",
@@ -16,10 +16,14 @@
     "voice-e2e": "tsx src/scripts/voice-e2e.ts"
   },
   "dependencies": {
+    "@types/qrcode": "^1.5.6",
     "dotenv": "^18.0.3",
+    "esbuild": "^0.28.2",
     "node-pty": "^1.1.0",
     "openai": "^7.23.0",
     "playwright-core": "^1.63.0",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^5.5.0",
     "vscode-jsonrpc": "^9.0.2",
     "zod": "^4.6.5"
   },

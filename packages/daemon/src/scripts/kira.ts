@@ -14,6 +14,10 @@
  * Run it in a VS Code terminal (with the Kira extension installed) and Kira's
  * assistant opens in that window's right-hand side bar: an orb that listens,
  * thinks and speaks, the conversation, and the run's progress. --no-vscode opts out.
+ *
+ * --phone: control Kira from a phone on the same Wi-Fi. Scan the QR code it
+ * prints; hold the button on the phone and talk, and Kira answers on the phone.
+ * --no-laptop-mic: listen only to the phone (for a laptop whose mic is poor).
  */
 import { config as loadEnv } from "dotenv";
 import { randomBytes } from "node:crypto";
@@ -27,6 +31,7 @@ import { findConfig, loadModelsConfig } from "../config/models.js";
 import { pendingApprovals } from "../daemon/deck.js";
 import { KiraDaemon, pipeName } from "../daemon/server.js";
 import { announce, findHook } from "../daemon/vscode-hook.js";
+import { startPhoneLink, type PhoneLink } from "../remote/phone.js";
 import { openMemory } from "../memory/run-memory.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import { createVerifier } from "../verify/ladder.js";
@@ -41,6 +46,9 @@ const { values } = parseArgs({
     "no-verify": { type: "boolean", default: false },
     "voice-args": { type: "string", default: "" },
     "no-vscode": { type: "boolean", default: false },
+    phone: { type: "boolean", default: false },
+    "phone-port": { type: "string", default: "7443" },
+    "no-laptop-mic": { type: "boolean", default: false },
   },
 });
 const workspace = resolve(values.workspace ?? process.cwd());
@@ -73,7 +81,18 @@ const daemon = new KiraDaemon({
   initGit: values["init-git"],
   defaults: { autonomy: Number(values.autonomy) as AutonomyLevel },
   log: (l) => console.log(dim(l)),
-  ...(mistralKey ? { voice: { mistralApiKey: mistralKey, args: [...(values["always-listen"] ? ["--always-listen"] : []), ...(values["voice-args"] ? values["voice-args"].split(" ") : [])] } } : {}),
+  ...(mistralKey
+    ? {
+        voice: {
+          mistralApiKey: mistralKey,
+          args: [
+            ...(values["always-listen"] ? ["--always-listen"] : []),
+            ...(values["no-laptop-mic"] ? ["--source", "none"] : []),
+            ...(values["voice-args"] ? values["voice-args"].split(" ") : []),
+          ],
+        },
+      }
+    : {}),
 });
 
 daemon.onEvent((k: KiraEvent) => {
@@ -109,7 +128,8 @@ if (hook) {
   const shown = await announce(hook, { pipe, token, workspace, pid: process.pid });
   console.log(shown ? "[kira] assistant opened in VS Code (right side bar)." : dim("[kira] could not reach the Kira extension in VS Code; continuing in this terminal."));
 }
-if (values.voice) {
+const wantVoice = values.voice || values.phone || values["no-laptop-mic"];
+if (wantVoice) {
   if (!mistralKey) {
     console.error("Voice needs MISTRAL_API_KEY in .env (Voxtral speech).");
     process.exit(2);
@@ -117,13 +137,30 @@ if (values.voice) {
   console.log("[kira] starting voice (first start downloads the local wake model, ~75 MB)…");
   const st = await daemon.voiceStart();
   console.log(`[kira] listening on "${st.input}", speaking on "${st.output}" (voice ${st.voice}).`);
-  console.log(
+  if (!values["no-laptop-mic"]) console.log(
     values["always-listen"]
       ? '[kira] always listening: just talk. Say "stop" to interrupt a run.'
       : '[kira] say "Kira, …" to start; after Kira answers, reply without the name. "stop" interrupts a run.',
   );
 } else {
   console.log('[kira] type a goal and press Enter ("stop" interrupts, "exit" quits).');
+}
+
+let phone: PhoneLink | undefined;
+if (values.phone) {
+  try {
+    phone = await startPhoneLink(daemon, { port: Number(values["phone-port"]), log: (l) => console.log(dim(`[kira] ${l}`)) });
+    const QR = await import("qrcode");
+    console.log(`
+[kira] phone: scan this on a phone on the same Wi-Fi (or open ${phone.urls[0]} and pair with the code below).`);
+    console.log(await QR.toString(phone.pairUrl, { type: "terminal", small: true }));
+    console.log(dim(`  pairing link: ${phone.pairUrl}`));
+    if (phone.urls.length > 1) console.log(dim(`  other addresses: ${phone.urls.slice(1).join("  ")}`));
+    console.log(dim('  first time: the phone warns about the certificate (Kira made it on this laptop): choose "Advanced" → "Proceed".'));
+    console.log(dim("  Windows may ask to allow Node.js through the firewall: allow it on private networks."));
+  } catch (err) {
+    console.error(`[kira] the phone link could not start: ${(err as Error).message}`);
+  }
 }
 
 // Typed input: goals when idle, y/n for approvals, "stop", "exit".
@@ -157,6 +194,7 @@ async function shutdown(): Promise<void> {
   const st = daemon.voiceStatus();
   if (st.samples) console.log(`[kira] voice: median end-of-speech → first word ${st.ackP50Ms?.toFixed(0)} ms over ${st.samples} utterance(s)`);
   rl.close();
+  await phone?.close();
   await daemon.close();
   process.exit(0);
 }

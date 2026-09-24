@@ -176,6 +176,10 @@ def test_a_conversation_needs_the_wake_word_only_once(whisper):
     ask, echo, follow = clip("Kira, are you listening to me?"), clip(reply, voice=KIRA_VOICE), clip("What kinds of projects can you build?")
     engine, speaker, events = make(whisper)
     run(engine, ask)
+    # Like the daemon: the reply comes only once the question has arrived (a slow machine may still be transcribing).
+    end = time.time() + 20
+    while not any(e["type"] == "utterance" for e in events) and time.time() < end:
+        time.sleep(0.05)
     engine.command({"type": "say", "id": "s1", "text": reply, "listen": True})  # the fake speaker finishes at once
     run(engine, echo, realtime=False)  # its own voice, late, through the room
     run(engine, follow)

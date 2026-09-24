@@ -25,6 +25,9 @@ export type VoiceEvent =
   | { type: "speaking"; state: "start" | "end"; id: string }
   | { type: "latency"; kind: "ack" | "stop"; ms: number }
   | { type: "level"; rms: number; speech: boolean }
+  /** Kira's voice for the phone (while output is "remote"): int16 PCM, base64. */
+  | { type: "audio_out"; rate: number; pcm: string }
+  | { type: "audio_hush" }
   | { type: "log"; level: string; msg: string };
 
 /**
@@ -174,6 +177,21 @@ export class VoiceBridge {
     await this.route(text);
   }
 
+  /** Push-to-talk audio from the phone: 16 kHz mono int16 PCM. Heard as addressed to Kira (no wake word). */
+  audio(pcm: Buffer): void {
+    this.send({ type: "audio", pcm: pcm.toString("base64") });
+  }
+
+  /** Where Kira's voice plays: the laptop, the remote device (phone), or both. */
+  output(target: "laptop" | "remote" | "both"): void {
+    this.send({ type: "output", target });
+  }
+
+  /** Stop talking now (the phone's talk button was pressed). */
+  hush(): void {
+    this.send({ type: "hush" });
+  }
+
   /** Tests: speak `text` into a sidecar started with --source inject, as if a person said it. */
   hear(text: string): void {
     this.send({ type: "hear", text });
@@ -198,7 +216,7 @@ export class VoiceBridge {
 
   private onVoice(ev: VoiceEvent): void {
     this.opts.onUiEvent?.(ev);
-    if (ev.type === "level") return;
+    if (ev.type === "level" || ev.type === "audio_out" || ev.type === "audio_hush") return;
     this.opts.onVoiceEvent?.(ev);
     const log = this.opts.log ?? (() => {});
     switch (ev.type) {

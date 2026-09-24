@@ -18,6 +18,14 @@ Rough completion: about 80/100.
 
 ## Exactly where I stopped (Phase 5)
 
+### Phone remote (2026-09-24, night)
+- `npm run kira -- --phone --workspace DIR` (add `--no-laptop-mic` when the laptop mic is poor) starts an HTTPS server on the Wi-Fi address (port 7443, `--phone-port`) and prints a **QR code**. Scan it on a phone on the same Wi-Fi, accept the one-time certificate warning, and the phone becomes Kira's remote: hold the button to talk (or tap once for hands-free: it sends after 1.3 s of quiet), and Kira answers **through the phone's speaker**. The phone also shows the orb, the conversation, the run with Stop and Allow/Deny, and a text box.
+- Code: `daemon/src/remote/phone.ts` (server: page, server-sent events, `/audio` `/ask` `/stop` `/approve` `/hush` `/voice`), `remote/cert.ts` (self-signed cert for the LAN IPs, pairing token; both kept in `%LOCALAPPDATA%\kira\remote`, delete `token` to unpair), `remote/web/phone.ts` + `phone.css` (bundled with esbuild at startup). The orb is shared with the VS Code assistant: `daemon/src/ui/orb.ts`.
+- Sidecar: push-to-talk audio arrives as `{"type":"audio"}` and is treated as addressed (no wake word, no echo rules, no continuation wait). Kira's voice goes through `OutputRouter` (laptop / remote / both). While a phone is connected it plays on the phone (`audio_out` events), and on the laptop again when the phone disconnects. `--source none` means no laptop mic.
+- Why server-sent events and not WebSockets: iOS refuses WebSockets to a self-signed certificate even after the page was trusted.
+- Checked: a real end-to-end run (spoken question sent as phone audio → heard correctly → spoken reply streamed back as audio), and the page in a mobile-sized Edge with a fake mic (connect, hold to talk, type, no errors).
+- Windows asks to allow Node.js through the firewall the first time: allow it on **private** networks.
+
 ### VS Code assistant (2026-09-24, late)
 - `npm run kira -- --voice --workspace DIR` **in a VS Code terminal** opens Kira in that window's **right-hand side bar**: an animated orb (idle, hearing your level, thinking, speaking, working), a caption with what Kira is saying, the conversation, the current run with Stop and Allow/Deny, and a box to type to Kira (answered like speech). `--no-vscode` opts out.
 - How: the extension listens on a local pipe (`vscode/src/hook.ts`). New terminals get it through `KIRA_VSCODE_HOOK`; older ones find it through `%LOCALAPPDATA%\kira\vscode-hooks\<pid>.json`. The CLI's daemon then listens on its own pipe with a session token, and the extension attaches as a client (`DaemonClient.attach`). See `daemon/src/daemon/vscode-hook.ts`.
@@ -70,6 +78,7 @@ Next:
 npm run typecheck && npm test          # all packages (daemon ~2 min)
 npm run spike -- "goal" --workspace DIR # headless run
 npm run kira -- --voice --workspace DIR # voice; in a VS Code terminal the assistant opens in the side bar
+npm run kira -- --phone --no-laptop-mic --workspace DIR   # control Kira from a phone (scan the QR)
 npm run vscode:install                  # build and install the extension into VS Code
 KIRA_VSCODE_DOWNLOAD=1 npm run test:vscode -w kira-agent   # real VS Code integration test
 npm run recall-probe                    # memory quality

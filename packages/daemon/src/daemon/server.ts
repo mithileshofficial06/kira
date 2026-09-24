@@ -27,7 +27,7 @@ import type { KiraMemory } from "../memory/run-memory.js";
 import { MemoryStore } from "../memory/store.js";
 import type { ApprovalAnswer, Approver } from "../tools/index.js";
 import { AbortedError } from "../util/abort.js";
-import { p50, VoiceBridge, type VoiceHost, type VoiceOptions } from "../voice/bridge.js";
+import { p50, VoiceBridge, type VoiceHost, type VoiceOptions, type VoiceUiEvent } from "../voice/bridge.js";
 import { emptyDeck, reduceDeck, type DeckState } from "./deck.js";
 import {
   Methods,
@@ -319,6 +319,8 @@ export class KiraDaemon {
       log: this.opts.log,
       onUiEvent: (e) => {
         userUi?.(e);
+        for (const s of this.voiceSubscribers) s(e);
+        if (e.type === "audio_out" || e.type === "audio_hush") return; // audio is for the phone, not the VS Code clients
         for (const c of this.clients) if (c.authed) void c.conn.sendNotification(Methods.voiceEvent, e).catch(() => undefined);
       },
     });
@@ -331,6 +333,28 @@ export class KiraDaemon {
       throw new ResponseError(-32005, `voice failed to start: ${this.voiceError}`);
     }
     return this.voiceStatus();
+  }
+
+  private readonly voiceSubscribers = new Set<(e: VoiceUiEvent) => void>();
+  /** Live voice activity (what the VS Code clients get as kira/voice, plus Kira's audio for the phone). */
+  onVoiceUi(fn: (e: VoiceUiEvent) => void): () => void {
+    this.voiceSubscribers.add(fn);
+    return () => this.voiceSubscribers.delete(fn);
+  }
+
+  /** Push-to-talk audio from the phone (16 kHz mono int16). */
+  voiceAudio(pcm: Buffer): boolean {
+    if (!this.voice?.running) return false;
+    this.voice.audio(pcm);
+    return true;
+  }
+
+  voiceOutput(target: "laptop" | "remote" | "both"): void {
+    this.voice?.output(target);
+  }
+
+  voiceHush(): void {
+    this.voice?.hush();
   }
 
   /** A typed message: with voice on, answered like speech (a question gets a spoken reply); otherwise a run. */

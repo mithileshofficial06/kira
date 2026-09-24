@@ -161,3 +161,75 @@ class Player:
     def close(self) -> None:
         self.stream.stop()
         self.stream.close()
+
+
+class RemoteOut:
+    """Kira's voice for a remote device (the phone): audio goes to the daemon instead of a sound card.
+
+    Same interface as Player. Timing is estimated from the audio's length, so
+    the engine's "is Kira still talking" rules keep working.
+    """
+
+    def __init__(self, rate: Callable[[], int], emit: Callable[[dict], None]) -> None:
+        self.rate, self.emit = rate, emit
+        self.playing_until = 0.0
+        self.audible_until = 0.0
+
+    def play(self, audio: np.ndarray, on_first_audio: Callable[[float], None] | None = None) -> None:
+        now = time.monotonic()
+        rate = self.rate()
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        self.emit({"type": "audio_out", "rate": rate, "pcm": base64.b64encode(pcm).decode("ascii")})
+        if on_first_audio:
+            on_first_audio(now)
+        self.playing_until = max(self.playing_until, now) + len(audio) / rate
+        self.audible_until = self.playing_until + 0.35
+
+    def hush(self) -> None:
+        self.emit({"type": "audio_hush"})
+        self.playing_until = 0.0
+        self.audible_until = min(self.audible_until, time.monotonic() + 0.35)
+
+    @property
+    def playing(self) -> bool:
+        return time.monotonic() < self.playing_until
+
+    def close(self) -> None:
+        pass
+
+
+class OutputRouter:
+    """Sends Kira's voice to the laptop, the remote device, or both; the daemon switches it when a phone connects."""
+
+    TARGETS = ("laptop", "remote", "both")
+
+    def __init__(self, laptop, remote: RemoteOut, target: str = "laptop") -> None:
+        self.laptop, self.remote = laptop, remote
+        self.target = target
+
+    def set_target(self, target: str) -> None:
+        if target in self.TARGETS and target != self.target:
+            self.hush()
+            self.target = target
+
+    def _outs(self) -> list:
+        return {"laptop": [self.laptop], "remote": [self.remote], "both": [self.laptop, self.remote]}[self.target]
+
+    def play(self, audio: np.ndarray, on_first_audio: Callable[[float], None] | None = None) -> None:
+        for i, o in enumerate(self._outs()):
+            o.play(audio, on_first_audio if i == 0 else None)
+
+    def hush(self) -> None:
+        for o in (self.laptop, self.remote):
+            o.hush()
+
+    @property
+    def playing(self) -> bool:
+        return any(o.playing for o in self._outs())
+
+    @property
+    def audible_until(self) -> float:
+        return max(o.audible_until for o in self._outs())
+
+    def close(self) -> None:
+        self.laptop.close()

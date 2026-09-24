@@ -65,6 +65,8 @@ class Utterance:
     audio: np.ndarray  # float32, 16 kHz, mono
     #: time.monotonic() when the last speech frame arrived: "end of speech" for latency.
     end_of_speech: float
+    #: Spoken on purpose to Kira (push-to-talk on the phone): no wake word needed, and it arrives whole.
+    addressed: bool = False
     duration_s: float = field(init=False)
 
     def __post_init__(self) -> None:

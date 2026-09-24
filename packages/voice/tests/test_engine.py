@@ -256,3 +256,61 @@ def test_a_short_yes_or_no_to_an_approval_skips_the_cloud_transcript():
     e.handle(utt())
     assert [(x["text"], x["source"]) for x in ev if x["type"] == "utterance"] == [("No.", "local")]
     assert cloud.calls == 0
+
+
+def _pcm(seconds: float) -> str:
+    import base64
+
+    return base64.b64encode(np.zeros(int(16000 * seconds), dtype="<i2").tobytes()).decode()
+
+
+def _drain(engine, events, n=1, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end and sum(e["type"] in ("utterance", "stop") for e in events) < n:
+        time.sleep(0.02)
+
+
+def test_phone_push_to_talk_needs_no_wake_word_and_interrupts_kira():
+    engine, speaker, events, _ = make(Script("build a login page"), Script("Build a login page."))
+    try:
+        engine.command({"type": "audio", "pcm": _pcm(1.5)})
+        _drain(engine, events)
+        assert [e for e in events if e["type"] == "utterance"][0]["text"] == "Build a login page."
+        assert "On it." in speaker.said and speaker.hushed >= 1
+    finally:
+        engine.close()
+
+
+def test_phone_stop_and_empty_tap():
+    engine, speaker, events, _ = make(Script("stop"))
+    try:
+        engine.command({"type": "audio", "pcm": _pcm(1.0)})
+        _drain(engine, events)
+        assert types(events) == ["stop"]
+        engine.command({"type": "audio", "pcm": _pcm(0.1)})  # a tap with nothing said
+        end = time.time() + 3
+        while "Sorry, I didn't catch that." not in speaker.said and time.time() < end:
+            time.sleep(0.02)
+        assert "Sorry, I didn't catch that." in speaker.said
+    finally:
+        engine.close()
+
+
+def test_output_router_sends_voice_to_the_phone():
+    from kira_voice.tts import OutputRouter, RemoteOut
+
+    sent: list[dict] = []
+    laptop = SimpleNamespace(played=0, playing=False, audible_until=0.0)
+    laptop.play = lambda a, cb=None: setattr(laptop, "played", laptop.played + 1)
+    laptop.hush = lambda: None
+    r = OutputRouter(laptop, RemoteOut(lambda: 24000, sent.append))
+    r.play(np.zeros(2400, dtype=np.float32))
+    assert laptop.played == 1 and not sent
+    r.set_target("remote")
+    firsts: list[float] = []
+    r.play(np.zeros(24000, dtype=np.float32), firsts.append)
+    assert laptop.played == 1  # the laptop stays quiet
+    assert [m["type"] for m in sent] == ["audio_hush", "audio_out"]  # switching hushes, then the phone gets the audio
+    assert sent[-1]["rate"] == 24000 and len(firsts) == 1 and r.playing
+    r.hush()
+    assert sent[-1]["type"] == "audio_hush" and not r.playing

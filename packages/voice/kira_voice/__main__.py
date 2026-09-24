@@ -19,7 +19,7 @@ from . import protocol
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="kira_voice")
-    ap.add_argument("--source", default="mic", help='"mic", comma-separated WAV files, or "inject" (tests: {"type": "hear", "text": ...} speaks into it)')
+    ap.add_argument("--source", default="mic", help='"mic", comma-separated WAV files, "none" (no microphone: the phone only), or "inject" (tests: {"type": "hear", "text": ...} speaks into it)')
     ap.add_argument("--fast", action="store_true", help="feed files faster than real time")
     ap.add_argument("--input-device", type=int, default=None)
     ap.add_argument("--output-device", type=int, default=None)
@@ -48,13 +48,13 @@ def main(argv: list[str] | None = None) -> int:
     from .sources import FileSource, InjectSource, MicSource, resample
     from .speaker import VoiceSpeaker
     from .stt import LocalWhisper, VoxtralTranscriber
-    from .tts import PhraseCache, Player, VoxtralTTS
+    from .tts import OutputRouter, PhraseCache, Player, RemoteOut, VoxtralTTS
     from .vad import Segmenter, SileroVAD
 
     tts = VoxtralTTS(key, voice=args.voice)
     cache = PhraseCache(tts)
     cache.warm()
-    player = Player(tts.sample_rate, device=args.output_device)
+    player = OutputRouter(Player(tts.sample_rate, device=args.output_device), RemoteOut(lambda: tts.sample_rate, protocol.emit))
     speaker = VoiceSpeaker(tts, cache, player)
     local = LocalWhisper(args.whisper)
     local.transcribe(np.zeros(16000, dtype=np.float32))  # the first call is slow: pay for it before anyone speaks
@@ -63,11 +63,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.source == "mic":
         source = MicSource(args.input_device)
-    elif args.source == "inject":
-        source = InjectSource()
+    elif args.source in ("inject", "none"):
+        source = InjectSource()  # "none": real-time silence, so only phone audio is heard
     else:
         source = FileSource(args.source.split(","), realtime=not args.fast)
     out_name = sd.query_devices(args.output_device, "output")["name"]
+    if args.source == "none":
+        source.name = "none (phone only)"
     stop = threading.Event()
 
     def on_command(cmd: dict) -> None:
