@@ -22,6 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { runAgent, type AgentEvent } from "../agent/loop.js";
+import { CheckpointManager } from "../checkpoint/manager.js";
 import { systemPrompt } from "../agent/prompt.js";
 import { findConfig, loadModelsConfig, Role } from "../config/models.js";
 import { ProviderRegistry } from "../providers/registry.js";
@@ -65,6 +66,15 @@ if (registry.chain(role).length === 0) {
 
 const workspace = resolve(values.workspace ?? join(tmpdir(), `kira-spike-${Date.now()}`));
 await mkdir(workspace, { recursive: true });
+
+// Checkpoints: a temp workspace gets `git init`; a user folder is never initialized behind their back.
+const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}`;
+let checkpoints: { manager: CheckpointManager; runId: string } | undefined;
+try {
+  checkpoints = { manager: await CheckpointManager.open(workspace, { initIfMissing: !values.workspace }), runId };
+} catch {
+  console.warn(`[kira] ${workspace} is not a git repository: running WITHOUT checkpoints or rewind.`);
+}
 
 // ---- interrupt handling ------------------------------------------------
 const controller = new AbortController();
@@ -119,7 +129,7 @@ const onEvent = (e: AgentEvent) => {
   }
 };
 
-console.log(`[kira] workspace: ${workspace}`);
+console.log(`[kira] workspace: ${workspace}${checkpoints ? ` (checkpoints: refs/kira/checkpoints/${runId}/*)` : ""}`);
 console.log(`[kira] role: ${role} → ${registry.chain(role).map((r) => `${r.provider}/${r.model}`).join(" → ")}`);
 console.log(`[kira] goal: ${goal}`);
 
@@ -132,6 +142,7 @@ const result = await runAgent((req, signal, onFallback) => registry.chat(role, r
   signal: controller.signal,
   maxSteps: Number(values["max-steps"]),
   onEvent,
+  checkpoints,
 });
 
 const secs = ((Date.now() - started) / 1000).toFixed(0);
