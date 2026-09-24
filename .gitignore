@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.kira/
+coverage/
+*.log
+.DS_Store
+__pycache__/
+.venv/
