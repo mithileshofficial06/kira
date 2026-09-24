@@ -15,6 +15,7 @@
  *   --max-steps <n>      step budget (default 30)
  *   --max-cost <usd>     cost ceiling (default 2)
  *   --resume <runId>     continue a run whose process died
+ *   --executor <p/model> pin the executor to one model, e.g. nim/z-ai/glm-5.3 (Phase 0 "both providers", bake-off)
  *
  * Ctrl+C once interrupts cleanly (process trees killed, the interrupted step
  * rewound, history kept to the last complete turn). Ctrl+C twice exits.
@@ -31,6 +32,7 @@ import { runSession } from "../control/runner.js";
 import { findConfig, loadModelsConfig } from "../config/models.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import type { Approver } from "../tools/index.js";
+import { parseModelLabel } from "../verify/critic.js";
 import { createVerifier } from "../verify/ladder.js";
 import { openMemory } from "../memory/run-memory.js";
 
@@ -56,6 +58,7 @@ const { values, positionals } = parseArgs({
     "max-steps": { type: "string", default: "30" },
     "max-cost": { type: "string", default: "2" },
     resume: { type: "string" },
+    executor: { type: "string" },
   },
 });
 
@@ -76,6 +79,12 @@ const config = loadModelsConfig(configPath);
 const registry = new ProviderRegistry(config);
 if (registry.chain("executor").length === 0) {
   console.error('No API key for any "executor" model. Copy .env.example to .env and add MISTRAL_API_KEY and/or NVIDIA_API_KEY.');
+  process.exit(2);
+}
+
+const pinnedExecutor = values.executor ? parseModelLabel(values.executor) : undefined;
+if (values.executor && !pinnedExecutor) {
+  console.error('--executor must look like "mistral/codestral-latest" or "nim/z-ai/glm-5.3"');
   process.exit(2);
 }
 
@@ -163,13 +172,16 @@ const onEvent = (k: KiraEvent) => {
 
 const memory = await openMemory(workspace, registry, config);
 console.log(`[kira] workspace: ${workspace}`);
-console.log(`[kira] executor: ${registry.chain("executor").map((r) => `${r.provider}/${r.model}`).join(" → ")}`);
+console.log(`[kira] executor: ${(pinnedExecutor ? [pinnedExecutor] : registry.chain("executor")).map((r) => `${r.provider}/${r.model}`).join(" → ")}`);
 console.log(`[kira] goal: ${goal ?? `(resuming ${values.resume})`}`);
 
 const report = await runSession({
   goal: goal ?? "",
   workspace,
-  chatFor: (role) => (req, signal, onFallback) => registry.chat(role, req, signal, onFallback),
+  chatFor: (role) => (req, signal, onFallback) =>
+    role === "executor" && pinnedExecutor
+      ? registry.chatWith(role, [pinnedExecutor], req, signal, onFallback)
+      : registry.chat(role, req, signal, onFallback),
   approver,
   signal: controller.signal,
   autonomy: autonomy as AutonomyLevel,
